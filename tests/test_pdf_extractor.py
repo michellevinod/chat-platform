@@ -7,7 +7,7 @@ def main():
     extractor = PDFExtractor()
 
     raw_document = extractor.extract(
-        Path("storage/uploads/benchmark.pdf")
+        Path("storage/uploads/PDF_BenchmarkTester_63Pages.pdf")
     )
 
     print("=" * 50)

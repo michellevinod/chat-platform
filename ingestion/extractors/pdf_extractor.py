@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import fitz
+import pymupdf
 
 from app.ingestion.extractors.base_extractor import BaseExtractor
 from app.ingestion.extractors.raw_models import (
@@ -19,7 +19,7 @@ class PDFExtractor(BaseExtractor):
         file_path: Path,
     ) -> RawDocument:
 
-        document = fitz.open(file_path)
+        document = pymupdf.open(file_path)
 
         pages = []
 
