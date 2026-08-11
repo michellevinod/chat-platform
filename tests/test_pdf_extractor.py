@@ -1,22 +1,58 @@
 from pathlib import Path
 
 from app.ingestion.extractors.pdf_extractor import PDFExtractor
+from app.ingestion.normalizers.pdf_normalizer import PDFNormalizer
 
 
 def main():
+
     extractor = PDFExtractor()
 
-    raw_document = extractor.extract(
+    document = extractor.extract(
         Path("storage/uploads/PDF_BenchmarkTester_63Pages.pdf")
     )
 
-    print("=" * 50)
-    print(f"File Name   : {raw_document.file_name}")
-    print(f"Total Pages : {raw_document.total_pages}")
-    print(f"Pages Found : {len(raw_document.pages)}")
-    print("=" * 50)
+    normalizer = PDFNormalizer()
 
-    print(raw_document.pages[0])
+    document = normalizer.normalize(document)
+
+
+    from app.ingestion.metadata.metadata_generator import MetadataGenerator
+
+    metadata_generator = MetadataGenerator()
+
+    document = metadata_generator.generate(
+        document=document,
+        project_name="Forge Project",
+        project_id="project_001",
+        document_id="doc_001",
+    )
+
+    print(document.metadata)
+
+
+
+    print("=" * 80)
+    print(f"Document : {document.file_name}")
+    print(f"Pages    : {document.total_pages}")
+    print("=" * 80)
+
+    first_page = document.pages[0]
+
+    print(f"Page Number : {first_page.page_number}")
+    print(f"Blocks Found: {len(first_page.blocks)}")
+
+    print()
+
+    for block in first_page.blocks:
+
+        print("=" * 50)
+        print(f"Block Number : {block.block_number}")
+        print(f"Block Type   : {block.block_type}")
+        print(f"BBox         : {block.bbox}")
+        print("-" * 50)
+        print(block.text)
+        print()
 
 
 if __name__ == "__main__":

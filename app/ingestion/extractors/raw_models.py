@@ -2,18 +2,32 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from app.models.enums import BlockType
 
-class RawTextBlock(BaseModel):
+
+class RawBlock(BaseModel):
     """
-    Raw text extracted from a document.
+    Base class for every extracted block.
+    """
+
+    page_number: int
+
+    block_number: int
+
+    block_type: BlockType
+
+    bbox: tuple[float, float, float, float]
+
+
+class RawTextBlock(RawBlock):
+    """
+    Raw text block extracted from a document.
     """
 
     text: str
 
-    bbox: tuple[float, float, float, float] | None = None
 
-
-class RawTable(BaseModel):
+class RawTableBlock(RawBlock):
     """
     Raw table extracted from a document.
     """
@@ -22,10 +36,8 @@ class RawTable(BaseModel):
 
     rows: list[list[str]]
 
-    bbox: tuple[float, float, float, float] | None = None
 
-
-class RawImage(BaseModel):
+class RawImageBlock(RawBlock):
     """
     Raw image extracted from a document.
     """
@@ -33,8 +45,6 @@ class RawImage(BaseModel):
     image_name: str
 
     image_path: Path
-
-    bbox: tuple[float, float, float, float] | None = None
 
 
 class RawPage(BaseModel):
@@ -44,11 +54,7 @@ class RawPage(BaseModel):
 
     page_number: int
 
-    text_blocks: list[RawTextBlock] = Field(default_factory=list)
-
-    tables: list[RawTable] = Field(default_factory=list)
-
-    images: list[RawImage] = Field(default_factory=list)
+    blocks: list[RawBlock] = Field(default_factory=list)
 
 
 class RawDocument(BaseModel):
@@ -59,5 +65,7 @@ class RawDocument(BaseModel):
     file_name: str
 
     total_pages: int
+
+    metadata: dict = Field(default_factory=dict)
 
     pages: list[RawPage] = Field(default_factory=list)
