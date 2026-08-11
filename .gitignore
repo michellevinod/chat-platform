@@ -1,0 +1,36 @@
+# Virtual Environment
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# Environment Variables
+.env
+
+# Logs
+*.log
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Test Cache
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Storage (keep folders, ignore contents if desired)
+storage/images/*
+storage/tables/*
+storage/summaries/*
+!storage/images/.gitkeep
+!storage/tables/.gitkeep
+!storage/summaries/.gitkeep
