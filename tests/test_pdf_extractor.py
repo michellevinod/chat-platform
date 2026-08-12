@@ -120,5 +120,25 @@ def main():
     print(len(chunks[0].embedding))
 
 
+    from app.repositories.qdrant_repository import QdrantRepository
+
+    repository = QdrantRepository()
+
+    repository.create_collection(
+        collection_name="documents",
+        vector_size=len(chunks[0].embedding),
+    )
+
+    repository.upsert_chunks(
+        collection_name="documents",
+        chunks=chunks,
+    )
+
+    print()
+    print("=" * 80)
+    print("UPLOAD SUCCESSFUL")
+    print("=" * 80)
+
+
 if __name__ == "__main__":
     main()
