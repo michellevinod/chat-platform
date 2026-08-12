@@ -105,5 +105,20 @@ def main():
         print()
 
 
+    from app.embeddings.embedding_pipeline import EmbeddingPipeline
+
+    embedding_pipeline = EmbeddingPipeline()
+
+    chunks = embedding_pipeline.generate(chunks)
+
+    print("=" * 80)
+    print("First Chunk")
+    print("=" * 80)
+
+    print(chunks[0].text[:100])
+    print()
+    print(len(chunks[0].embedding))
+
+
 if __name__ == "__main__":
     main()
