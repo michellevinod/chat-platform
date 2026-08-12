@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field
 
 from app.models.enums import BlockType
 
+from app.ingestion.metadata.document_metadata import DocumentMetadata
+
 
 class RawBlock(BaseModel):
     """
@@ -18,6 +20,16 @@ class RawBlock(BaseModel):
 
     bbox: tuple[float, float, float, float]
 
+    heading: str | None = None
+
+    section: str | None = None
+
+    reading_order: int | None = None
+
+    language: str | None = None
+
+    metadata: dict = Field(default_factory=dict)
+
 
 class RawTextBlock(RawBlock):
     """
@@ -25,6 +37,8 @@ class RawTextBlock(RawBlock):
     """
 
     text: str
+
+    tokens: int | None = None
 
 
 class RawTableBlock(RawBlock):
@@ -36,6 +50,10 @@ class RawTableBlock(RawBlock):
 
     rows: list[list[str]]
 
+    caption: str | None = None
+
+    headers: list[str] = Field(default_factory=list)
+
 
 class RawImageBlock(RawBlock):
     """
@@ -45,6 +63,10 @@ class RawImageBlock(RawBlock):
     image_name: str
 
     image_path: Path
+
+    caption: str | None = None
+
+    alt_text: str | None = None
 
 
 class RawPage(BaseModel):
