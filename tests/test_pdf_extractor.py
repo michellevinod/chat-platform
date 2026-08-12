@@ -4,6 +4,7 @@ from app.ingestion.extractors.pdf_extractor import PDFExtractor
 from app.ingestion.normalizers.pdf_normalizer import PDFNormalizer
 
 
+"""
 def main():
 
     extractor = PDFExtractor()
@@ -52,6 +53,55 @@ def main():
         print(f"BBox         : {block.bbox}")
         print("-" * 50)
         print(block.text)
+        print()
+
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+
+from pathlib import Path
+
+from app.chunking.chunk_generator import ChunkGenerator
+from app.ingestion.extractors.pdf_extractor import PDFExtractor
+from app.ingestion.metadata.metadata_generator import MetadataGenerator
+from app.ingestion.normalizers.pdf_normalizer import PDFNormalizer
+
+
+def main():
+
+    extractor = PDFExtractor()
+
+    document = extractor.extract(
+        Path("storage/uploads/PDF_BenchmarkTester_63Pages.pdf")
+    )
+
+    normalizer = PDFNormalizer()
+    document = normalizer.normalize(document)
+
+    metadata_generator = MetadataGenerator()
+
+    document = metadata_generator.generate(
+        document=document,
+        project_name="Forge Project",
+        project_id="project_001",
+        document_id="doc_001",
+    )
+
+    generator = ChunkGenerator()
+
+    chunks = generator.generate(document)
+
+    print("=" * 80)
+    print(f"Chunks Generated: {len(chunks)}")
+    print("=" * 80)
+
+    for chunk in chunks[:5]:
+        print(chunk.id)
+        print(chunk.metadata)
+        print(chunk.text)
         print()
 
 
