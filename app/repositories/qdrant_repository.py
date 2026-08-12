@@ -7,6 +7,10 @@ from qdrant_client.http.models import (
 
 from app.chunking.chunk_models import DocumentChunk
 
+from qdrant_client.models import NearestQuery
+
+from app.rag.retrieved_chunk import RetrievedChunk
+
 
 class QdrantRepository:
     """
@@ -106,3 +110,37 @@ class QdrantRepository:
             points=points,
             wait=True,
         )
+
+
+    def search(
+        self,
+        collection_name: str,
+        query_vector: list[float],
+        limit: int = 5,
+    ):
+
+        response = self._client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            limit=limit,
+            with_payload=True,
+        )
+
+        results = []
+
+        for point in response.points:
+
+            payload = point.payload
+
+            results.append(
+                RetrievedChunk(
+                    text=payload["text"],
+                    score=point.score,
+                    project_name=payload["project_name"],
+                    document_name=payload["document_name"],
+                    page_number=payload["page_number"],
+                    chunk_number=payload["chunk_number"],
+                )
+            )
+
+        return results
