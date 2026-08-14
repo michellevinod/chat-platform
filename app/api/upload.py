@@ -7,6 +7,9 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from app.chunking.chunk_generator import ChunkGenerator
 from app.embeddings.embedding_pipeline import EmbeddingPipeline
 from app.ingestion.extractors.pdf_extractor import PDFExtractor
+from app.ingestion.extractors.docx_extractor import DOCXExtractor
+from app.ingestion.extractors.ppt_extractor import PPTXExtractor
+from app.ingestion.extractors.xlsx_extractor import XLSXExtractor
 from app.ingestion.normalizers.pdf_normalizer import PDFNormalizer
 from app.repositories.qdrant_repository import QdrantRepository
 
@@ -29,6 +32,7 @@ async def upload_document(
         ".pdf",
         ".docx",
         ".pptx",
+        ".xlsx",
     ]:
         raise HTTPException(
             status_code=400,
@@ -42,7 +46,24 @@ async def upload_document(
         shutil.copyfileobj(file.file, buffer)
 
     # Extract document
-    extractor = PDFExtractor()
+    if extension == ".pdf":
+        extractor = PDFExtractor()
+
+    elif extension == ".docx":
+        extractor = DOCXExtractor()
+
+    elif extension == ".pptx":
+        extractor = PPTXExtractor()
+
+    elif extension == ".xlsx":
+        extractor = XLSXExtractor()
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported document type.",
+        )
+
     document = extractor.extract(saved_path)
 
     # Normalize
