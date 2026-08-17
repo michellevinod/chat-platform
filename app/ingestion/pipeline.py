@@ -1,4 +1,8 @@
+from __future__ import annotations
+
+import uuid
 from pathlib import Path
+
 from app.chunking.chunk_generator import ChunkGenerator
 from app.embeddings.embedding_pipeline import EmbeddingPipeline
 from app.ingestion.extractors.docx_extractor import DOCXExtractor
@@ -12,11 +16,24 @@ from app.repositories.qdrant_repository import QdrantRepository
 class IngestionPipeline:
     """
     End-to-end document ingestion pipeline:
-    Extract -> Normalize -> Chunk -> Embed -> Qdrant Upsert.
+
+    Extract
+        -> Normalize
+        -> Attach metadata
+        -> Chunk
+        -> Embed
+        -> Store in Qdrant
+
+    The pipeline is format-agnostic and supports:
+    PDF, DOCX, PPTX, and XLSX.
     """
 
-    def __init__(self, collection_name: str = "documents") -> None:
+    def __init__(
+        self,
+        collection_name: str = "documents",
+    ) -> None:
         self.collection_name = collection_name
+
         self.normalizer = PDFNormalizer()
         self.chunk_generator = ChunkGenerator()
         self.embedding_pipeline = EmbeddingPipeline()
@@ -25,44 +42,124 @@ class IngestionPipeline:
     def process_file(
         self,
         file_path: Path,
-        project_name: str = "Default Project",
-        project_id: str = "project_001",
+        project_name: str,
+        project_id: str,
         document_name: str | None = None,
+        document_id: str | None = None,
     ) -> int:
-        ext = file_path.suffix.lower()
-        if ext == ".pdf":
+        """
+        Process and ingest one uploaded document.
+
+        All project/document metadata is supplied by the caller.
+        Nothing project-specific or document-specific is hardcoded.
+        """
+
+        extension = file_path.suffix.lower()
+
+        # -------------------------------------------------------------
+        # Select extractor dynamically from the uploaded file type.
+        # -------------------------------------------------------------
+
+        if extension == ".pdf":
             extractor = PDFExtractor()
-        elif ext == ".docx":
+
+        elif extension == ".docx":
             extractor = DOCXExtractor()
-        elif ext == ".pptx":
+
+        elif extension == ".pptx":
             extractor = PPTXExtractor()
-        elif ext == ".xlsx":
+
+        elif extension == ".xlsx":
             extractor = XLSXExtractor()
+
         else:
-            raise ValueError(f"Unsupported document type: {ext}")
+            raise ValueError(
+                f"Unsupported document type: {extension}"
+            )
 
-        doc = extractor.extract(file_path)
-        doc = self.normalizer.normalize(doc)
+        # -------------------------------------------------------------
+        # Extract
+        # -------------------------------------------------------------
 
-        final_doc_name = document_name or file_path.name
-        doc.metadata = {
-            "project_id": project_id,
-            "project_name": project_name,
-            "document_name": final_doc_name,
-            "document_type": ext.lstrip("."),
-            "source": ext.lstrip("."),
-        }
+        document = extractor.extract(file_path)
 
-        chunks = self.chunk_generator.generate(doc)
+        # -------------------------------------------------------------
+        # Normalize
+        # -------------------------------------------------------------
+
+        document = self.normalizer.normalize(document)
+
+        # -------------------------------------------------------------
+        # Resolve metadata dynamically
+        # -------------------------------------------------------------
+
+        final_document_name = (
+            document_name
+            or document.file_name
+        )
+
+        final_document_id = (
+            document_id
+            or str(uuid.uuid4())
+        )
+
+        document_type = extension.lstrip(".")
+        source = document_type
+
+        document.metadata.update(
+            {
+                "project_id": project_id,
+                "project_name": project_name,
+                "document_id": final_document_id,
+                "document_name": final_document_name,
+                "document_type": document_type,
+                "source": source,
+            }
+        )
+
+        # -------------------------------------------------------------
+        # Generate chunks
+        #
+        # ChunkGenerator reads the metadata from RawDocument.metadata.
+        # -------------------------------------------------------------
+
+        chunks = self.chunk_generator.generate(
+            document
+        )
+
         if not chunks:
             return 0
 
-        chunks = self.embedding_pipeline.generate(chunks)
+        # -------------------------------------------------------------
+        # Generate embeddings
+        # -------------------------------------------------------------
+
+        chunks = self.embedding_pipeline.generate(
+            chunks
+        )
+
+        if not chunks:
+            return 0
+
+        # -------------------------------------------------------------
+        # Create Qdrant collection if required
+        # -------------------------------------------------------------
+
+        embedding = chunks[0].embedding
+
+        if not embedding:
+            raise ValueError(
+                "Embedding generation returned no vector."
+            )
 
         self.repository.create_collection(
             collection_name=self.collection_name,
-            vector_size=len(chunks[0].embedding),
+            vector_size=len(embedding),
         )
+
+        # -------------------------------------------------------------
+        # Store chunks + metadata in Qdrant
+        # -------------------------------------------------------------
 
         self.repository.upsert_chunks(
             collection_name=self.collection_name,
