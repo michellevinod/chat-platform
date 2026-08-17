@@ -26,6 +26,12 @@ def chat(
     Chat with uploaded documents.
     """
 
-    result = _service.chat(request.query)
+    session_id = request.session_id or request.conversation_id
+    result = _service.chat(
+        query=request.query,
+        project_name=request.project_name,
+        document_name=request.document_name,
+        session_id=session_id,
+    )
 
-    return ChatResponse(**result)
+    return ChatResponse(**result)

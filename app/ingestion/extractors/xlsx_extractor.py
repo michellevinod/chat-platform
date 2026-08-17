@@ -4,8 +4,10 @@ from openpyxl import load_workbook
 
 from app.ingestion.extractors.base_extractor import BaseExtractor
 from app.ingestion.extractors.raw_models import (
+    RawBlock,
     RawDocument,
     RawPage,
+    RawTableBlock,
     RawTextBlock,
 )
 from app.models.enums import BlockType
@@ -13,7 +15,7 @@ from app.models.enums import BlockType
 
 class XLSXExtractor(BaseExtractor):
     """
-    Extracts text from Microsoft Excel (.xlsx) workbooks.
+    Extracts text and tables from Microsoft Excel (.xlsx) workbooks.
 
     Each worksheet is treated as one page.
     """
@@ -34,7 +36,7 @@ class XLSXExtractor(BaseExtractor):
 
         for sheet in workbook.worksheets:
 
-            blocks: list[RawTextBlock] = []
+            blocks: list[RawBlock] = []
 
             block_number = 0
 
@@ -51,29 +53,53 @@ class XLSXExtractor(BaseExtractor):
 
             block_number += 1
 
+            rows_data = []
             for row in sheet.iter_rows(values_only=True):
 
                 values = []
 
                 for cell in row:
                     if cell is None:
-                        continue
+                        values.append("")
+                    else:
+                        values.append(str(cell).strip())
 
-                    values.append(str(cell))
+                if any(v for v in values):
+                    rows_data.append(values)
 
-                if not values:
-                    continue
+                    blocks.append(
+                        RawTextBlock(
+                            page_number=page_number,
+                            block_number=block_number,
+                            block_type=BlockType.TEXT,
+                            bbox=(0.0, 0.0, 0.0, 0.0),
+                            text=" | ".join([v for v in values if v]),
+                        )
+                    )
+
+                    block_number += 1
+
+            if rows_data:
+                headers = rows_data[0]
+                lines = []
+                lines.append("| " + " | ".join(headers) + " |")
+                lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+                for r in rows_data[1:]:
+                    lines.append("| " + " | ".join(r) + " |")
+                md_table = "\n".join(lines)
 
                 blocks.append(
-                    RawTextBlock(
+                    RawTableBlock(
                         page_number=page_number,
                         block_number=block_number,
-                        block_type=BlockType.TEXT,
+                        block_type=BlockType.TABLE,
                         bbox=(0.0, 0.0, 0.0, 0.0),
-                        text=" | ".join(values),
+                        markdown=f"### Worksheet: {sheet.title}\n\n{md_table}",
+                        rows=rows_data,
+                        headers=headers,
+                        caption=f"Worksheet: {sheet.title}",
                     )
                 )
-
                 block_number += 1
 
             pages.append(
@@ -89,4 +115,4 @@ class XLSXExtractor(BaseExtractor):
             file_name=file_path.name,
             total_pages=len(pages),
             pages=pages,
-        )
+        )

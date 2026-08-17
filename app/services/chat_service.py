@@ -1,128 +1,26 @@
-from app.rag.rag_tool import RAGTool
+from app.services.document_intelligence_service import DocumentIntelligenceService
 
 
 class ChatService:
     """
     Main chat orchestration service.
-
-    Responsibilities:
-    - Greeting detection
-    - Reject unrelated questions
-    - Invoke RAG
-    - Format citations
+    Delegates to DocumentIntelligenceService for grounded RAG,
+    filtering, ambiguity resolution, and Gemini synthesis.
     """
 
-    GREETINGS = {
-        "hi",
-        "hello",
-        "hey",
-        "good morning",
-        "good afternoon",
-        "good evening",
-    }
-
     def __init__(self) -> None:
-        self._rag = RAGTool()
+        self._doc_intelligence = DocumentIntelligenceService()
 
     def chat(
         self,
         query: str,
+        project_name: str | None = None,
+        document_name: str | None = None,
+        session_id: str | None = None,
     ) -> dict:
-
-        query = query.strip()
-
-        if not query:
-            return {
-                "success": False,
-                "message": "Query cannot be empty.",
-            }
-
-        if self._is_greeting(query):
-            return {
-                "success": True,
-                "response": "Hello! 👋 Upload one or more documents and ask me anything related to them.",
-                "citations": [],
-            }
-
-        if self._is_out_of_scope(query):
-            return {
-                "success": True,
-                "response": (
-                    "I can answer questions only from uploaded documents. "
-                    "Please upload a document and ask questions related to it."
-                ),
-                "citations": [],
-            }
-
-        results = self._rag.search(
-            query=query,
-            limit=5,
-        )
-
-        if not results:
-            return {
-                "success": True,
-                "response": "I couldn't find relevant information in the uploaded documents.",
-                "citations": [],
-            }
-
-        answer = "\n\n".join(
-            chunk.text
-            for chunk in results
-        )
-
-        citations = []
-
-        seen = set()
-
-        for chunk in results:
-
-            key = (
-                chunk.document_name,
-                chunk.page_number,
-            )
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-
-            citations.append(
-                {
-                    "document": chunk.document_name,
-                    "page": chunk.page_number,
-                }
-            )
-
-        return {
-            "success": True,
-            "response": answer,
-            "citations": citations,
-        }
-
-    def _is_greeting(
-        self,
-        query: str,
-    ) -> bool:
-
-        return query.lower() in self.GREETINGS
-
-    def _is_out_of_scope(
-        self,
-        query: str,
-    ) -> bool:
-
-        lowered = query.lower()
-
-        blocked = [
-            "capital of",
-            "who is",
-            "weather",
-            "news",
-            "cricket",
-            "football",
-            "movie",
-            "recipe",
-        ]
-
-        return any(word in lowered for word in blocked)
+        return self._doc_intelligence.answer(
+            question=query,
+            project_name=project_name,
+            document_name=document_name,
+            session_id=session_id,
+        )

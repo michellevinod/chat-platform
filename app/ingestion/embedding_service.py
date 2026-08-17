@@ -1,0 +1,3 @@
+from app.embeddings.sentence_transformer_embedding_service import SentenceTransformerEmbeddingService
+
+__all__ = ["SentenceTransformerEmbeddingService"]

@@ -2,12 +2,12 @@ from pathlib import Path
 import shutil
 import uuid
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.chunking.chunk_generator import ChunkGenerator
 from app.embeddings.embedding_pipeline import EmbeddingPipeline
-from app.ingestion.extractors.pdf_extractor import PDFExtractor
 from app.ingestion.extractors.docx_extractor import DOCXExtractor
+from app.ingestion.extractors.pdf_extractor import PDFExtractor
 from app.ingestion.extractors.ppt_extractor import PPTXExtractor
 from app.ingestion.extractors.xlsx_extractor import XLSXExtractor
 from app.ingestion.normalizers.pdf_normalizer import PDFNormalizer
@@ -24,9 +24,13 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 @router.post("")
 async def upload_document(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    project_name: str | None = Form(default=None),
+    project_id: str | None = Form(default=None),
+    document_name: str | None = Form(default=None),
 ):
-    extension = Path(file.filename).suffix.lower()
+    original_filename = file.filename or "uploaded_document"
+    extension = Path(original_filename).suffix.lower()
 
     if extension not in [
         ".pdf",
@@ -48,16 +52,12 @@ async def upload_document(
     # Extract document
     if extension == ".pdf":
         extractor = PDFExtractor()
-
     elif extension == ".docx":
         extractor = DOCXExtractor()
-
     elif extension == ".pptx":
         extractor = PPTXExtractor()
-
     elif extension == ".xlsx":
         extractor = XLSXExtractor()
-
     else:
         raise HTTPException(
             status_code=400,
@@ -68,6 +68,19 @@ async def upload_document(
 
     # Normalize
     document = PDFNormalizer().normalize(document)
+
+    final_doc_name = document_name or original_filename
+    final_proj_name = project_name or "Default Project"
+    final_proj_id = project_id or "project_001"
+
+    document.metadata = {
+        "project_id": final_proj_id,
+        "project_name": final_proj_name,
+        "document_id": str(uuid.uuid4()),
+        "document_name": final_doc_name,
+        "document_type": extension.lstrip("."),
+        "source": extension.lstrip("."),
+    }
 
     # Generate chunks
     chunks = ChunkGenerator().generate(document)
@@ -82,7 +95,6 @@ async def upload_document(
     chunks = EmbeddingPipeline().generate(chunks)
 
     repository = QdrantRepository()
-
     collection_name = "documents"
 
     # Create collection if it doesn't exist
@@ -99,6 +111,7 @@ async def upload_document(
 
     return {
         "success": True,
-        "document": file.filename,
+        "project": final_proj_name,
+        "document": final_doc_name,
         "chunks_uploaded": len(chunks),
-    }
+    }
