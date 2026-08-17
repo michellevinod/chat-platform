@@ -12,6 +12,7 @@ router = APIRouter(
     tags=["Chat"],
 )
 
+
 _service = ChatService()
 
 
@@ -26,12 +27,12 @@ def chat(
     Chat with uploaded documents.
     """
 
-    session_id = request.session_id or request.conversation_id
     result = _service.chat(
         query=request.query,
         project_name=request.project_name,
         document_name=request.document_name,
-        session_id=session_id,
+        session_id=request.session_id,
+        conversation_id=request.conversation_id,
     )
 
-    return ChatResponse(**result)
+    return ChatResponse(**result)

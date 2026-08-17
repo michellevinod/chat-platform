@@ -1,34 +1,36 @@
+from app.repositories.qdrant_repository import QdrantRepository
 from app.embeddings.sentence_transformer_embedding_service import (
     SentenceTransformerEmbeddingService,
 )
-from app.repositories.qdrant_repository import QdrantRepository
 
 
 class SearchService:
+    """
+    Performs semantic retrieval against Qdrant.
+
+    Optional metadata filters allow callers to restrict retrieval
+    to a project, document, or specific chunk type.
+    """
 
     def __init__(self):
-
         self._embedding_service = (
             SentenceTransformerEmbeddingService()
         )
 
-        self._repository = (
-            QdrantRepository()
-        )
+        self._repository = QdrantRepository()
 
     def semantic_search(
         self,
         query: str,
-        limit: int = 8,
+        limit: int = 5,
         project_name: str | None = None,
         document_name: str | None = None,
+        project_id: str | None = None,
+        document_id: str | None = None,
         chunk_type: str | None = None,
     ):
-
-        embedding = (
-            self._embedding_service.generate_embedding(
-                query
-            )
+        embedding = self._embedding_service.generate_embedding(
+            query
         )
 
         return self._repository.search(
@@ -37,21 +39,7 @@ class SearchService:
             limit=limit,
             project_name=project_name,
             document_name=document_name,
+            project_id=project_id,
+            document_id=document_id,
             chunk_type=chunk_type,
         )
-
-    def get_distinct_documents(
-        self,
-        project_name: str | None = None,
-    ) -> list[str]:
-        return self._repository.get_distinct_documents(
-            collection_name="documents",
-            project_name=project_name,
-        )
-
-    def get_distinct_projects(
-        self,
-    ) -> list[str]:
-        return self._repository.get_distinct_projects(
-            collection_name="documents",
-        )
