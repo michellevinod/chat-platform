@@ -1,4 +1,5 @@
 import os
+import re
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
@@ -28,7 +29,9 @@ class QdrantRepository:
         port: int = 6333,
     ) -> None:
 
-        qdrant_url = os.getenv("QDRANT_URL")
+        qdrant_url = os.getenv(
+            "QDRANT_URL"
+        )
 
         api_key = (
             os.getenv("QDRANT_API_KEY")
@@ -36,11 +39,14 @@ class QdrantRepository:
         )
 
         if qdrant_url:
+
             self._client = QdrantClient(
                 url=qdrant_url,
                 api_key=api_key,
             )
+
         else:
+
             self._client = QdrantClient(
                 host=host,
                 port=port,
@@ -116,6 +122,8 @@ class QdrantRepository:
                 "table_id": meta.table_id,
                 "table_headers": meta.table_headers,
                 "table_rows": meta.table_rows,
+                "caption": getattr(meta, "caption", None),
+                "table_number": getattr(meta, "table_number", None),
 
                 # Image metadata
                 "image_id": meta.image_id,
@@ -218,6 +226,7 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if project_name:
+
             must_conditions.append(
                 FieldCondition(
                     key="project_name",
@@ -228,6 +237,7 @@ class QdrantRepository:
             )
 
         elif project_id:
+
             must_conditions.append(
                 FieldCondition(
                     key="project_id",
@@ -242,6 +252,7 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if document_name:
+
             must_conditions.append(
                 FieldCondition(
                     key="document_name",
@@ -252,6 +263,7 @@ class QdrantRepository:
             )
 
         elif document_id:
+
             must_conditions.append(
                 FieldCondition(
                     key="document_id",
@@ -266,6 +278,7 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if chunk_type:
+
             must_conditions.append(
                 FieldCondition(
                     key="chunk_type",
@@ -280,6 +293,7 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if page_number is not None:
+
             must_conditions.append(
                 FieldCondition(
                     key="page_number",
@@ -294,6 +308,7 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if image_id:
+
             must_conditions.append(
                 FieldCondition(
                     key="image_id",
@@ -356,6 +371,136 @@ class QdrantRepository:
         ]
 
         if project_name:
+
+            must_conditions.append(
+                FieldCondition(
+                    key="project_name",
+                    match=MatchValue(
+                        value=project_name,
+                    ),
+                )
+            )
+
+        if document_name:
+
+            must_conditions.append(
+                FieldCondition(
+                    key="document_name",
+                    match=MatchValue(
+                        value=document_name,
+                    ),
+                )
+            )
+
+        if page_number is not None:
+
+            must_conditions.append(
+                FieldCondition(
+                    key="page_number",
+                    match=MatchValue(
+                        value=page_number,
+                    ),
+                )
+            )
+
+        if image_id:
+
+            must_conditions.append(
+                FieldCondition(
+                    key="image_id",
+                    match=MatchValue(
+                        value=image_id,
+                    ),
+                )
+            )
+
+        query_filter = Filter(
+            must=must_conditions
+        )
+
+        points, _ = self._client.scroll(
+            collection_name=collection_name,
+            scroll_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+        )
+
+        return self._convert_results(
+            points
+        )
+
+
+    def find_tables_by_query(
+        self,
+        collection_name: str,
+        query: str,
+        project_name: str | None = None,
+        document_name: str | None = None,
+        table_number: str | None = None,
+        limit: int = 5,
+    ) -> list[RetrievedChunk]:
+        """
+        Retrieve table chunks using deterministic metadata + lexical matching.
+
+        This is intentionally separate from vector similarity search because
+        table requests such as:
+
+            Show me Table 1. Harvey 1 well data record
+            Show me Table 4. Summary result of MICP tests for Harvey 1
+            Show me Table on page 24
+
+        are better handled by exact table/page constraints followed by
+        lightweight content matching.
+
+        Existing indexed documents are supported even when their payload does
+        not contain the optional caption/table_number fields.
+        """
+
+        lowered_query = query.lower()
+
+        # ------------------------------------------------------------
+        # Extract explicit page number.
+        # ------------------------------------------------------------
+
+        page_match = re.search(
+            r"\b(?:page|pages|pg|p\.)\s*(\d+)\b",
+            lowered_query,
+        )
+        page_number = (
+            int(page_match.group(1))
+            if page_match
+            else None
+        )
+
+        # ------------------------------------------------------------
+        # Extract explicit table number.
+        # ------------------------------------------------------------
+
+        table_match = re.search(
+            r"\btable\s*(\d+)\b",
+            lowered_query,
+        )
+        requested_table_number = (
+            table_match.group(1)
+            if table_match
+            else None
+        )
+
+        # ------------------------------------------------------------
+        # Restrict retrieval to table chunks belonging to the requested
+        # project/document/page.
+        # ------------------------------------------------------------
+
+        must_conditions: list[FieldCondition] = [
+            FieldCondition(
+                key="chunk_type",
+                match=MatchValue(
+                    value="table",
+                ),
+            )
+        ]
+
+        if project_name:
             must_conditions.append(
                 FieldCondition(
                     key="project_name",
@@ -385,29 +530,217 @@ class QdrantRepository:
                 )
             )
 
-        if image_id:
-            must_conditions.append(
-                FieldCondition(
-                    key="image_id",
-                    match=MatchValue(
-                        value=image_id,
-                    ),
-                )
-            )
-
         query_filter = Filter(
             must=must_conditions
         )
 
+        # We deliberately use scroll here instead of vector search.
         points, _ = self._client.scroll(
             collection_name=collection_name,
             scroll_filter=query_filter,
-            limit=limit,
+            limit=1000,
             with_payload=True,
         )
 
+        if not points:
+            return []
+
+        # ------------------------------------------------------------
+        # Normalize query terms.
+        # ------------------------------------------------------------
+
+        stop_words = {
+            "show",
+            "me",
+            "the",
+            "a",
+            "an",
+            "table",
+            "tables",
+            "on",
+            "page",
+            "pages",
+            "pg",
+            "from",
+            "of",
+            "for",
+            "please",
+            "give",
+            "display",
+            "get",
+            "find",
+            "this",
+            "that",
+        }
+
+        query_terms = {
+            token
+            for token in re.findall(
+                r"[a-z0-9]+",
+                lowered_query,
+            )
+            if len(token) >= 3
+            and token not in stop_words
+        }
+
+        # Terms that are particularly useful for identifying the requested
+        # table. Give these a larger weight than generic matching.
+        important_terms = {
+            "harvey",
+            "micp",
+            "summary",
+            "result",
+            "results",
+            "well",
+            "data",
+            "record",
+        }
+
+        scored_points: list[tuple[int, object]] = []
+
+        for point in points:
+            payload = point.payload or {}
+
+            text_value = str(
+                payload.get("text") or ""
+            )
+
+            heading_value = str(
+                payload.get("heading") or ""
+            )
+
+            section_value = str(
+                payload.get("section") or ""
+            )
+
+            caption_value = str(
+                payload.get("caption") or ""
+            )
+
+            table_id_value = str(
+                payload.get("table_id") or ""
+            )
+
+            table_number_value = str(
+                payload.get("table_number") or ""
+            )
+
+            searchable_text = " ".join(
+                [
+                    text_value,
+                    heading_value,
+                    section_value,
+                    caption_value,
+                    table_id_value,
+                    table_number_value,
+                ]
+            ).lower()
+
+            score = 0
+
+            # --------------------------------------------------------
+            # Explicit table number.
+            #
+            # Prefer a real caption/table_number if present. For older
+            # records without those fields, do NOT reject the result;
+            # content matching still determines relevance.
+            # --------------------------------------------------------
+
+            if requested_table_number:
+                explicit_number_patterns = [
+                    rf"\btable\s*{re.escape(requested_table_number)}\b",
+                    rf"\btable[_\-\s]*{re.escape(requested_table_number)}\b",
+                ]
+
+                if any(
+                    re.search(
+                        pattern,
+                        searchable_text,
+                    )
+                    for pattern in explicit_number_patterns
+                ):
+                    score += 100
+
+                if (
+                    table_number_value
+                    == requested_table_number
+                ):
+                    score += 150
+
+            # --------------------------------------------------------
+            # Exact content matching.
+            # --------------------------------------------------------
+
+            for term in query_terms:
+                if term in searchable_text:
+                    if term in important_terms:
+                        score += 8
+                    else:
+                        score += 2
+
+            # Exact phrase matching is a strong signal.
+            normalized_query = re.sub(
+                r"\s+",
+                " ",
+                lowered_query,
+            ).strip()
+
+            normalized_text = re.sub(
+                r"\s+",
+                " ",
+                searchable_text,
+            )
+
+            # Useful phrases from common table queries.
+            for phrase in (
+                "harvey 1",
+                "well data record",
+                "summary result",
+                "micp tests",
+                "summary result of micp tests",
+            ):
+                if phrase in normalized_query:
+                    if phrase in normalized_text:
+                        score += 30
+
+            # --------------------------------------------------------
+            # Page query is already an exact Qdrant filter, so every
+            # returned point is relevant to the requested page.
+            # --------------------------------------------------------
+
+            if page_number is not None:
+                score += 100
+
+            if score > 0:
+                scored_points.append(
+                    (
+                        score,
+                        point,
+                    )
+                )
+
+        # ------------------------------------------------------------
+        # If the query is simply "table on page X", return all tables
+        # from that exact page rather than requiring lexical matches.
+        # ------------------------------------------------------------
+
+        if page_number is not None and not query_terms:
+            return self._convert_results(
+                points[:limit]
+            )
+
+        scored_points.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        selected_points = [
+            point
+            for _, point in scored_points[:limit]
+        ]
+
         return self._convert_results(
-            points
+            selected_points
         )
 
     # ================================================================
@@ -641,3 +974,78 @@ class QdrantRepository:
 
         except Exception:
             return []
+
+    # ================================================================
+    # TABLE SEARCH
+    # ================================================================
+
+    def find_tables(
+        self,
+        collection_name: str,
+        project_name: str | None = None,
+        document_name: str | None = None,
+        page_number: int | None = None,
+        limit: int = 10,
+    ) -> list[RetrievedChunk]:
+        """
+        Retrieve table chunks using exact metadata filters.
+
+        No vector similarity is used.
+        """
+
+        must_conditions: list[FieldCondition] = [
+            FieldCondition(
+                key="chunk_type",
+                match=MatchValue(
+                    value="table",
+                ),
+            )
+        ]
+
+        if project_name:
+
+            must_conditions.append(
+                FieldCondition(
+                    key="project_name",
+                    match=MatchValue(
+                        value=project_name,
+                    ),
+                )
+            )
+
+        if document_name:
+
+            must_conditions.append(
+                FieldCondition(
+                    key="document_name",
+                    match=MatchValue(
+                        value=document_name,
+                    ),
+                )
+            )
+
+        if page_number is not None:
+
+            must_conditions.append(
+                FieldCondition(
+                    key="page_number",
+                    match=MatchValue(
+                        value=page_number,
+                    ),
+                )
+            )
+
+        query_filter = Filter(
+            must=must_conditions
+        )
+
+        points, _ = self._client.scroll(
+            collection_name=collection_name,
+            scroll_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+        )
+
+        return self._convert_results(
+            points
+        )

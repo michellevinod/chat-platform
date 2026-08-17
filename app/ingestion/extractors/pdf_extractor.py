@@ -24,24 +24,49 @@ IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 class PDFExtractor(BaseExtractor):
     """
-    Extracts text, tables, images, and figure captions from PDF documents.
+    Extracts text, tables, images, and captions from PDF documents.
 
     Image extraction is format-independent and uses PyMuPDF.
 
     Figure captions are detected from nearby text blocks and attached
     to the corresponding image whenever possible.
+
+    Table captions are detected from nearby text blocks and attached
+    to the corresponding table whenever possible.
     """
 
-    # Common caption patterns:
-    #
-    # Fig. 10—Something
-    # Fig. 10 - Something
-    # Fig. 10: Something
-    # Figure 10—Something
-    # Figure 10: Something
+    # ---------------------------------------------------------------
+    # FIGURE CAPTION PATTERN
+    # ---------------------------------------------------------------
+
     FIGURE_PATTERN = re.compile(
         r"^\s*"
         r"(?:fig(?:ure)?\.?)"
+        r"\s*"
+        r"(\d+)"
+        r"\s*"
+        r"(?:[-–—:.)]\s*|\s+)"
+        r"(.+?)"
+        r"\s*$",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    # ---------------------------------------------------------------
+    # TABLE CAPTION PATTERN
+    #
+    # Supports examples such as:
+    #
+    # Table 1. Harvey 1 well data record
+    # Table 1 - Harvey 1 well data record
+    # Table 1 — Harvey 1 well data record
+    # Table 1: Harvey 1 well data record
+    # TABLE 1. ...
+    # Table 1 Harvey 1 well data record
+    # ---------------------------------------------------------------
+
+    TABLE_PATTERN = re.compile(
+        r"^\s*"
+        r"table"
         r"\s*"
         r"(\d+)"
         r"\s*"
@@ -123,7 +148,10 @@ class PDFExtractor(BaseExtractor):
                     ):
                         md_table = table.to_markdown()
 
-                        if not md_table or not md_table.strip():
+                        if (
+                            not md_table
+                            or not md_table.strip()
+                        ):
                             continue
 
                         df_headers = getattr(
@@ -135,6 +163,8 @@ class PDFExtractor(BaseExtractor):
                         headers = (
                             [
                                 str(h)
+                                if h is not None
+                                else ""
                                 for h in df_headers.names
                             ]
                             if (
@@ -149,23 +179,62 @@ class PDFExtractor(BaseExtractor):
 
                         rows = table.extract() or []
 
+                        table_bbox = tuple(
+                            getattr(
+                                table,
+                                "bbox",
+                                (
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                ),
+                            )
+                        )
+
+                        # ------------------------------------------------
+                        # Find the REAL table caption from nearby text.
+                        # ------------------------------------------------
+
+                        table_caption_info = (
+                            self._find_table_caption(
+                                table_bbox=table_bbox,
+                                text_blocks=text_blocks,
+                            )
+                        )
+
+                        if table_caption_info:
+                            caption = (
+                                table_caption_info[
+                                    "caption"
+                                ]
+                            )
+
+                            table_number = (
+                                table_caption_info[
+                                    "table_number"
+                                ]
+                            )
+                        else:
+                            # Safe fallback when the PDF has no detectable
+                            # table caption.
+                            table_number = str(
+                                tab_idx + 1
+                            )
+
+                            caption = (
+                                f"Table "
+                                f"{table_number} "
+                                f"on Page "
+                                f"{page_number}"
+                            )
+
                         blocks.append(
                             RawTableBlock(
                                 page_number=page_number,
                                 block_number=block_number,
                                 block_type=BlockType.TABLE,
-                                bbox=tuple(
-                                    getattr(
-                                        table,
-                                        "bbox",
-                                        (
-                                            0.0,
-                                            0.0,
-                                            0.0,
-                                            0.0,
-                                        ),
-                                    )
-                                ),
+                                bbox=table_bbox,
                                 markdown=md_table.strip(),
                                 rows=[
                                     [
@@ -179,12 +248,7 @@ class PDFExtractor(BaseExtractor):
                                     for row in rows
                                 ],
                                 headers=headers,
-                                caption=(
-                                    f"Table "
-                                    f"{tab_idx + 1} "
-                                    f"on Page "
-                                    f"{page_number}"
-                                ),
+                                caption=caption,
                             )
                         )
 
@@ -223,6 +287,230 @@ class PDFExtractor(BaseExtractor):
             )
 
         return pages
+
+    # ================================================================
+    # TABLE CAPTION ASSOCIATION
+    # ================================================================
+
+    def _find_table_caption(
+        self,
+        table_bbox: tuple,
+        text_blocks: list[RawTextBlock],
+    ) -> dict | None:
+        """
+        Find the most likely table caption associated with a table.
+
+        Preference:
+
+        1. Caption immediately above the table.
+        2. Caption immediately below the table.
+        3. Nearest horizontally aligned table caption.
+
+        Only text that matches the TABLE_PATTERN is considered.
+        """
+
+        if not text_blocks:
+            return None
+
+        table_x0, table_y0, table_x1, table_y1 = (
+            table_bbox
+        )
+
+        candidates = []
+
+        for text_block in text_blocks:
+            text = (
+                getattr(
+                    text_block,
+                    "text",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not text:
+                continue
+
+            # --------------------------------------------------------
+            # A PDF text block can contain multiple lines.
+            # Check each line independently so a page heading or
+            # paragraph containing the word "table" does not get
+            # mistaken for a caption.
+            # --------------------------------------------------------
+
+            lines = [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip()
+            ]
+
+            for line_index, line in enumerate(lines):
+                match = self.TABLE_PATTERN.match(line)
+
+                if not match:
+                    continue
+
+                table_number = match.group(1)
+                table_title = match.group(2).strip()
+
+                # ----------------------------------------------------
+                # If the caption wraps onto the next line, include
+                # nearby continuation text when it is short enough.
+                # ----------------------------------------------------
+
+                caption_parts = [
+                    table_title
+                ]
+
+                if line_index + 1 < len(lines):
+                    next_line = lines[
+                        line_index + 1
+                    ]
+
+                    # Avoid swallowing another caption or heading.
+                    if (
+                        not self.TABLE_PATTERN.match(
+                            next_line
+                        )
+                        and not self.FIGURE_PATTERN.match(
+                            next_line
+                        )
+                        and len(next_line) <= 200
+                    ):
+                        # Only append if the first line looks like a
+                        # caption rather than a very long paragraph.
+                        if len(table_title) < 180:
+                            caption_parts.append(
+                                next_line
+                            )
+
+                caption_title = " ".join(
+                    caption_parts
+                ).strip()
+
+                caption = (
+                    f"Table {table_number}. "
+                    f"{caption_title}"
+                )
+
+                block_bbox = getattr(
+                    text_block,
+                    "bbox",
+                    (
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ),
+                )
+
+                (
+                    block_x0,
+                    block_y0,
+                    block_x1,
+                    block_y1,
+                ) = block_bbox
+
+                # ----------------------------------------------------
+                # Horizontal overlap.
+                # ----------------------------------------------------
+
+                horizontal_overlap = max(
+                    0.0,
+                    min(
+                        table_x1,
+                        block_x1,
+                    )
+                    - max(
+                        table_x0,
+                        block_x0,
+                    ),
+                )
+
+                table_width = max(
+                    1.0,
+                    table_x1 - table_x0,
+                )
+
+                overlap_ratio = (
+                    horizontal_overlap
+                    / table_width
+                )
+
+                # ----------------------------------------------------
+                # Vertical relationship.
+                #
+                # Positive values mean the caption is separated from
+                # the table vertically.
+                # ----------------------------------------------------
+
+                if block_y1 <= table_y0:
+                    vertical_gap = (
+                        table_y0 - block_y1
+                    )
+
+                    position = "above"
+
+                elif block_y0 >= table_y1:
+                    vertical_gap = (
+                        block_y0 - table_y1
+                    )
+
+                    position = "below"
+
+                else:
+                    # Caption overlaps table vertically. This can
+                    # happen in unusual PDF layouts.
+                    vertical_gap = 0.0
+                    position = "overlap"
+
+                # ----------------------------------------------------
+                # Captions should be reasonably close to the table.
+                # ----------------------------------------------------
+
+                if vertical_gap > 300:
+                    continue
+
+                # Prefer horizontally aligned captions.
+                candidates.append(
+                    {
+                        "caption": caption,
+                        "table_number": table_number,
+                        "vertical_gap": vertical_gap,
+                        "overlap_ratio": overlap_ratio,
+                        "position": position,
+                    }
+                )
+
+        if not candidates:
+            return None
+
+        # ------------------------------------------------------------
+        # Ranking:
+        #
+        # 1. Caption above the table
+        # 2. Horizontal alignment
+        # 3. Short vertical distance
+        #
+        # This handles the common PDF layout where:
+        #
+        # Table 1. Caption
+        #
+        # [TABLE]
+        # ------------------------------------------------------------
+
+        candidates.sort(
+            key=lambda candidate: (
+                0
+                if candidate["position"]
+                == "above"
+                else 1,
+                -candidate["overlap_ratio"],
+                candidate["vertical_gap"],
+            )
+        )
+
+        return candidates[0]
 
     # ================================================================
     # IMAGE EXTRACTION
@@ -352,7 +640,7 @@ class PDFExtractor(BaseExtractor):
         return image_blocks
 
     # ================================================================
-    # CAPTION ASSOCIATION
+    # FIGURE CAPTION ASSOCIATION
     # ================================================================
 
     def _find_image_caption(
@@ -382,7 +670,6 @@ class PDFExtractor(BaseExtractor):
         candidates = []
 
         for text_block in text_blocks:
-
             text = (
                 getattr(
                     text_block,
@@ -510,7 +797,7 @@ class PDFExtractor(BaseExtractor):
         start_block_number: int = 0,
     ) -> list[RawTextBlock]:
         """
-        Extract reading-order text blocks from a page.
+        Extract reading-order text blocks from the page.
         """
 
         extracted_blocks = page.get_text(

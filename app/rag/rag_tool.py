@@ -21,7 +21,13 @@ class RAGTool:
         project_id: str | None = None,
         document_id: str | None = None,
         chunk_type: str | None = None,
+        page_number: int | None = None,
     ):
+        """
+        Search documents using semantic retrieval with optional
+        metadata filters.
+        """
+
         return self._search_service.semantic_search(
             query=query,
             limit=limit,
@@ -30,4 +36,5 @@ class RAGTool:
             project_id=project_id,
             document_id=document_id,
             chunk_type=chunk_type,
+            page_number=page_number,
         )

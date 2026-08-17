@@ -17,9 +17,8 @@ class ChatService:
     - Pass project/document scope into ChatAgent.
     - Build citations.
     - Render images using the public image endpoint.
-    - Return table and document responses.
-
-    The QueryClassifier is the single source of truth for query routing.
+    - Render structured tables as Markdown.
+    - Return normal document responses.
     """
 
     GREETINGS = {
@@ -186,7 +185,7 @@ class ChatService:
                 return {
                     "success": True,
                     "response": (
-                        f"### Figure / Image\n\n"
+                        "### Figure / Image\n\n"
                         f"**Document:** "
                         f"`{chunk.document_name}`  \n"
                         f"**Page:** "
@@ -202,10 +201,6 @@ class ChatService:
                 }
 
             # Public API route.
-            #
-            # This is deliberately NOT:
-            #
-            # storage/images/...
             #
             # The frontend/browser can request:
             #
@@ -247,20 +242,20 @@ class ChatService:
             # Keep the number of returned tables limited.
             for chunk in results[:2]:
 
-                table_text = getattr(
-                    chunk,
-                    "text",
-                    "",
-                ).strip()
+                markdown_table = (
+                    self._render_table_markdown(
+                        chunk
+                    )
+                )
 
-                if not table_text:
+                if not markdown_table:
                     continue
 
                 tables.append(
                     f"### Table from "
                     f"`{chunk.document_name}` "
                     f"(Page {chunk.page_number})\n\n"
-                    f"{table_text}"
+                    f"{markdown_table}"
                 )
 
             citations = self._build_citations(
@@ -319,6 +314,201 @@ class ChatService:
             "citations": citations,
             "session_id": session_id,
         }
+
+    # =============================================================
+    # TABLE RENDERING
+    # =============================================================
+
+    @staticmethod
+    def _render_table_markdown(
+        chunk,
+    ) -> str:
+        """
+        Render a retrieved table using its structured headers
+        and rows instead of the flattened semantic-search text.
+
+        The semantic-search text is intended for retrieval.
+        table_headers/table_rows are the canonical user-facing
+        representation.
+        """
+
+        headers = getattr(
+            chunk,
+            "table_headers",
+            None,
+        ) or []
+
+        rows = getattr(
+            chunk,
+            "table_rows",
+            None,
+        ) or []
+
+        # ---------------------------------------------------------
+        # Normalize headers
+        # ---------------------------------------------------------
+
+        headers = [
+            ChatService._clean_table_cell(
+                header
+            )
+            for header in headers
+        ]
+
+        # ---------------------------------------------------------
+        # Normalize rows
+        # ---------------------------------------------------------
+
+        normalized_rows = []
+
+        for row in rows:
+
+            if not row:
+                continue
+
+            normalized_row = [
+                ChatService._clean_table_cell(
+                    cell
+                )
+                for cell in row
+            ]
+
+            # Ignore completely empty rows.
+            if not any(
+                cell.strip()
+                for cell in normalized_row
+            ):
+                continue
+
+            normalized_rows.append(
+                normalized_row
+            )
+
+        # ---------------------------------------------------------
+        # Determine table width
+        # ---------------------------------------------------------
+
+        column_count = max(
+            [len(headers)]
+            + [
+                len(row)
+                for row in normalized_rows
+            ]
+            + [0]
+        )
+
+        # If structured data is unavailable,
+        # fall back to the original table text.
+        if column_count == 0:
+            return (
+                getattr(
+                    chunk,
+                    "text",
+                    "",
+                )
+                or ""
+            ).strip()
+
+        # ---------------------------------------------------------
+        # Missing headers
+        # ---------------------------------------------------------
+
+        if not headers:
+            headers = [
+                f"Column {index + 1}"
+                for index in range(
+                    column_count
+                )
+            ]
+
+        # Pad headers if necessary.
+        if len(headers) < column_count:
+            headers.extend(
+                [
+                    ""
+                    for _ in range(
+                        column_count
+                        - len(headers)
+                    )
+                ]
+            )
+
+        # ---------------------------------------------------------
+        # Markdown header
+        # ---------------------------------------------------------
+
+        lines = []
+
+        lines.append(
+            "| "
+            + " | ".join(
+                headers[:column_count]
+            )
+            + " |"
+        )
+
+        lines.append(
+            "| "
+            + " | ".join(
+                "---"
+                for _ in range(
+                    column_count
+                )
+            )
+            + " |"
+        )
+
+        # ---------------------------------------------------------
+        # Markdown rows
+        # ---------------------------------------------------------
+
+        for row in normalized_rows:
+
+            if len(row) < column_count:
+                row = row + [
+                    ""
+                    for _ in range(
+                        column_count
+                        - len(row)
+                    )
+                ]
+
+            elif len(row) > column_count:
+                row = row[:column_count]
+
+            lines.append(
+                "| "
+                + " | ".join(row)
+                + " |"
+            )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _clean_table_cell(
+        value,
+    ) -> str:
+        """
+        Normalize one table cell for Markdown output.
+        """
+
+        if value is None:
+            return ""
+
+        text = str(value)
+
+        # Collapse line breaks and repeated whitespace.
+        text = " ".join(
+            text.split()
+        )
+
+        # Escape Markdown column separators.
+        text = text.replace(
+            "|",
+            "\\|",
+        )
+
+        return text
 
     # =============================================================
     # CITATIONS
@@ -428,7 +618,9 @@ class ChatService:
         if not candidate:
             return None
 
-        candidate = str(candidate).strip()
+        candidate = str(
+            candidate
+        ).strip()
 
         if not candidate:
             return None

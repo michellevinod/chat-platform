@@ -19,8 +19,10 @@ class ChunkMetadata(BaseModel):
     section: str | None = None
 
     chunk_type: str = "text"
-
+    
     table_id: str | None = None
+    table_number: str | None = None
+    table_caption: str | None = None
     table_headers: list[str] = Field(default_factory=list)
     table_rows: list[list[str]] = Field(default_factory=list)
 

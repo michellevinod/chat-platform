@@ -12,10 +12,11 @@ class ImageService:
     Retrieval strategy:
 
     1. Exact image filename -> exact Qdrant metadata lookup.
-    2. Explicit page + image -> exact page metadata lookup.
+    2. Explicit page -> exact page metadata lookup.
     3. Figure/image description -> semantic image search.
 
-    LLMs are not required for any of these operations.
+    LLMs (Large Language Models) are not required for these
+    retrieval operations.
     """
 
     IMAGE_EXTENSIONS = {
@@ -37,6 +38,7 @@ class ImageService:
         project_name: str | None = None,
         document_name: str | None = None,
         limit: int = 5,
+        page_number: int | None = None,
     ) -> list[RetrievedChunk]:
 
         image_id = self._extract_image_filename(
@@ -57,12 +59,16 @@ class ImageService:
             )
 
         # ---------------------------------------------------------
-        # 2. EXACT PAGE + IMAGE
+        # 2. EXACT PAGE
         # ---------------------------------------------------------
 
-        page_number = self._extract_page_number(
-            query
-        )
+        # Prefer the explicitly supplied page number from
+        # ChatAgent. Fall back to extracting it here so this
+        # service remains safe when called directly.
+        if page_number is None:
+            page_number = self._extract_page_number(
+                query
+            )
 
         if page_number is not None:
             return self._repository.find_images(
@@ -92,15 +98,8 @@ class ImageService:
     ) -> str | None:
         """
         Extract an image filename from the user query.
-
-        Examples:
-
-            img_f28db4f9_p37_2.png
-            figure_1.jpg
-            diagram.webp
         """
 
-        # Match normal filenames containing an image extension.
         extension_pattern = (
             r"([a-zA-Z0-9_.-]+"
             r"\.(?:png|jpg|jpeg|webp|gif|bmp))"
@@ -115,8 +114,6 @@ class ImageService:
         if match:
             return match.group(1)
 
-        # Match generated image IDs if the extension
-        # has been omitted.
         generated_id_pattern = (
             r"\b(img[_-][a-zA-Z0-9_-]+)\b"
         )

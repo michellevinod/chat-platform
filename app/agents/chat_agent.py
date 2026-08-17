@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import re
+
 from app.agents.base_agent import BaseAgent
 from app.agents.query_classifier import (
     QueryClassifier,
@@ -15,6 +19,10 @@ class ChatAgent(BaseAgent):
 
     Routes document queries according to their intent so that
     images and tables do not get mixed with ordinary text retrieval.
+
+    Explicit page references are extracted from the user's query
+    and passed as exact metadata filters instead of relying on
+    semantic similarity.
     """
 
     def __init__(self):
@@ -53,6 +61,23 @@ class ChatAgent(BaseAgent):
         enhanced_query = self._enhancer.enhance(query)
 
         # ---------------------------------------------------------
+        # Extract explicit page reference.
+        #
+        # Examples:
+        #
+        #   "show me table on page 24"
+        #   "show the image from page 37"
+        #   "figure on page 10"
+        #
+        # If no explicit page is present, page_number remains None
+        # and normal semantic retrieval is used.
+        # ---------------------------------------------------------
+
+        page_number = self._extract_page_number(
+            query
+        )
+
+        # ---------------------------------------------------------
         # IMAGE SEARCH
         # ---------------------------------------------------------
 
@@ -62,6 +87,7 @@ class ChatAgent(BaseAgent):
                 project_name=project_name,
                 document_name=document_name,
                 limit=5,
+                page_number=page_number,
             )
 
             return {
@@ -79,6 +105,7 @@ class ChatAgent(BaseAgent):
                 project_name=project_name,
                 document_name=document_name,
                 limit=5,
+                page_number=page_number,
             )
 
             return {
@@ -111,3 +138,43 @@ class ChatAgent(BaseAgent):
             "intent": intent,
             "query": enhanced_query,
         }
+
+    @staticmethod
+    def _extract_page_number(
+        query: str,
+    ) -> int | None:
+        """
+        Extract an explicit page number from a natural-language query.
+
+        Supported examples:
+
+            page 24
+            Page 24
+            on page 24
+            from page 24
+            pages 24
+
+        Returns None when the user did not explicitly specify
+        a page.
+        """
+
+        match = re.search(
+            r"\bpages?\s+(\d+)\b",
+            query,
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            return None
+
+        try:
+            page_number = int(
+                match.group(1)
+            )
+        except ValueError:
+            return None
+
+        if page_number <= 0:
+            return None
+
+        return page_number

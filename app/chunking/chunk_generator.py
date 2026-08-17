@@ -149,7 +149,10 @@ class ChunkGenerator:
                         "",
                     ).strip()
 
-                    # Normalize headers.
+                    # -----------------------------------------------------
+                    # Normalize headers
+                    # -----------------------------------------------------
+
                     normalized_headers = [
                         str(header).strip()
                         if header is not None
@@ -157,8 +160,11 @@ class ChunkGenerator:
                         for header in headers
                     ]
 
+                    # -----------------------------------------------------
                     # Normalize rows while preserving
                     # the original row/column structure.
+                    # -----------------------------------------------------
+
                     normalized_rows: list[list[str]] = []
 
                     for row in rows:
@@ -182,6 +188,10 @@ class ChunkGenerator:
                     ):
                         continue
 
+                    # -----------------------------------------------------
+                    # Stable table identifier
+                    # -----------------------------------------------------
+
                     table_id = (
                         f"table_"
                         f"{document_id}_"
@@ -189,15 +199,45 @@ class ChunkGenerator:
                         f"{block.block_number}"
                     )
 
-                    # Use structured data as the canonical
-                    # representation for semantic retrieval.
-                    table_text = (
-                        self._build_table_text(
-                            headers=normalized_headers,
-                            rows=normalized_rows,
-                            fallback_markdown=markdown,
+                    # -----------------------------------------------------
+                    # Extract table caption
+                    #
+                    # Example:
+                    # "Table 1 - Harvey 1 Well Data"
+                    # -----------------------------------------------------
+
+                    table_caption = (
+                        getattr(
+                            block,
+                            "caption",
+                            None,
                         )
+                        or ""
+                    ).strip()
+
+                    # -----------------------------------------------------
+                    # Build searchable table text
+                    #
+                    # IMPORTANT:
+                    # The caption is deliberately included here because
+                    # this text is later used for embedding/vector search.
+                    # -----------------------------------------------------
+
+                    table_text = self._build_table_text(
+                        headers=normalized_headers,
+                        rows=normalized_rows,
+                        fallback_markdown=markdown,
                     )
+
+                    if table_caption:
+                        table_text = (
+                            f"Table caption: {table_caption}\n"
+                            f"{table_text}"
+                        )
+
+                    # -----------------------------------------------------
+                    # Create table chunk
+                    # -----------------------------------------------------
 
                     chunks.append(
                         DocumentChunk(
@@ -211,27 +251,32 @@ class ChunkGenerator:
                                 document_type=document_type,
                                 page_number=page.page_number,
                                 chunk_number=chunk_number,
+
+                                # Preserve the table caption in the
+                                # existing heading field.
                                 heading=(
-                                    getattr(
-                                        block,
-                                        "caption",
-                                        None,
-                                    )
+                                    table_caption
                                     or getattr(
                                         block,
                                         "heading",
                                         None,
                                     )
                                 ),
+
                                 section=getattr(
                                     block,
                                     "section",
                                     None,
                                 ),
+
                                 chunk_type="table",
+
                                 table_id=table_id,
+
                                 table_headers=normalized_headers,
+
                                 table_rows=normalized_rows,
+
                                 source=source,
                             ),
                         )
@@ -267,7 +312,7 @@ class ChunkGenerator:
                     #     getattr(block, "image_id", None)
                     #
                     # which resulted in image_id=None in Qdrant.
-                    #
+
                     image_id = image_name or None
 
                     caption = (

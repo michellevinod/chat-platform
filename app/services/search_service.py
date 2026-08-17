@@ -9,7 +9,7 @@ class SearchService:
     Performs semantic retrieval against Qdrant.
 
     Optional metadata filters allow callers to restrict retrieval
-    to a project, document, or specific chunk type.
+    to a project, document, specific chunk type, or page.
     """
 
     def __init__(self):
@@ -28,9 +28,19 @@ class SearchService:
         project_id: str | None = None,
         document_id: str | None = None,
         chunk_type: str | None = None,
+        page_number: int | None = None,
     ):
-        embedding = self._embedding_service.generate_embedding(
-            query
+        """
+        Perform semantic retrieval with optional metadata filters.
+
+        When page_number is supplied, Qdrant restricts retrieval
+        to that exact page before semantic ranking.
+        """
+
+        embedding = (
+            self._embedding_service.generate_embedding(
+                query
+            )
         )
 
         return self._repository.search(
@@ -42,4 +52,5 @@ class SearchService:
             project_id=project_id,
             document_id=document_id,
             chunk_type=chunk_type,
+            page_number=page_number,
         )
