@@ -18,9 +18,8 @@ class QdrantRepository:
     """
     Handles all communication with Qdrant.
 
-    Qdrant stores document chunks together with their metadata.
-    Project, document, and file-type information is always supplied
-    by the ingestion pipeline and is never hardcoded here.
+    Project, document, file type, image, and table metadata are
+    supplied dynamically by the ingestion pipeline.
     """
 
     def __init__(
@@ -29,9 +28,7 @@ class QdrantRepository:
         port: int = 6333,
     ) -> None:
 
-        qdrant_url = os.getenv(
-            "QDRANT_URL"
-        )
+        qdrant_url = os.getenv("QDRANT_URL")
 
         api_key = (
             os.getenv("QDRANT_API_KEY")
@@ -39,28 +36,26 @@ class QdrantRepository:
         )
 
         if qdrant_url:
-
             self._client = QdrantClient(
                 url=qdrant_url,
                 api_key=api_key,
             )
-
         else:
-
             self._client = QdrantClient(
                 host=host,
                 port=port,
                 api_key=api_key,
             )
 
+    # ================================================================
+    # COLLECTION
+    # ================================================================
+
     def create_collection(
         self,
         collection_name: str,
         vector_size: int,
     ) -> None:
-        """
-        Create a Qdrant collection if it does not already exist.
-        """
 
         collections = (
             self._client.get_collections()
@@ -83,17 +78,15 @@ class QdrantRepository:
             ),
         )
 
+    # ================================================================
+    # INGESTION
+    # ================================================================
+
     def upsert_chunks(
         self,
         collection_name: str,
         chunks: list[DocumentChunk],
     ) -> None:
-        """
-        Store document chunks and their complete metadata in Qdrant.
-
-        All document/project metadata comes from the chunk itself.
-        Nothing document-specific is hardcoded here.
-        """
 
         points: list[PointStruct] = []
 
@@ -119,17 +112,17 @@ class QdrantRepository:
 
                 "chunk_type": meta.chunk_type,
 
+                # Table metadata
                 "table_id": meta.table_id,
                 "table_headers": meta.table_headers,
                 "table_rows": meta.table_rows,
 
+                # Image metadata
                 "image_id": meta.image_id,
                 "image_path": meta.image_path,
 
                 "source": meta.source,
 
-                # Internal retrieval key.
-                # Never expose this value to the user.
                 "chunk_key": (
                     f"{meta.project_id}:"
                     f"{meta.document_id}:"
@@ -155,19 +148,16 @@ class QdrantRepository:
             wait=True,
         )
 
+    # ================================================================
+    # DOCUMENT DELETE
+    # ================================================================
+
     def delete_document(
         self,
         collection_name: str,
         project_name: str,
         document_name: str,
     ) -> None:
-        """
-        Delete all chunks belonging to one document within one project.
-
-        This is intentionally scoped by both project_name and
-        document_name so that documents with the same name in
-        different projects are not affected.
-        """
 
         document_filter = Filter(
             must=[
@@ -192,6 +182,10 @@ class QdrantRepository:
             wait=True,
         )
 
+    # ================================================================
+    # SEMANTIC SEARCH
+    # ================================================================
+
     def search(
         self,
         collection_name: str,
@@ -202,22 +196,28 @@ class QdrantRepository:
         project_id: str | None = None,
         document_id: str | None = None,
         chunk_type: str | None = None,
+        page_number: int | None = None,
+        image_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """
-        Search Qdrant using vector similarity and optional metadata filters.
+        Perform vector similarity search with optional metadata filters.
 
-        Filtering is dynamic and can be applied by:
-        - project name
-        - project ID
-        - document name
-        - document ID
-        - chunk type
+        Metadata filters are applied BEFORE semantic ranking.
+
+        This allows queries such as:
+
+            image on page 44
+            image_id = img_xxx.png
+            tables from a specific document
         """
 
         must_conditions: list[FieldCondition] = []
 
-        if project_name:
+        # ------------------------------------------------------------
+        # Project
+        # ------------------------------------------------------------
 
+        if project_name:
             must_conditions.append(
                 FieldCondition(
                     key="project_name",
@@ -228,7 +228,6 @@ class QdrantRepository:
             )
 
         elif project_id:
-
             must_conditions.append(
                 FieldCondition(
                     key="project_id",
@@ -238,8 +237,11 @@ class QdrantRepository:
                 )
             )
 
-        if document_name:
+        # ------------------------------------------------------------
+        # Document
+        # ------------------------------------------------------------
 
+        if document_name:
             must_conditions.append(
                 FieldCondition(
                     key="document_name",
@@ -250,7 +252,6 @@ class QdrantRepository:
             )
 
         elif document_id:
-
             must_conditions.append(
                 FieldCondition(
                     key="document_id",
@@ -260,13 +261,44 @@ class QdrantRepository:
                 )
             )
 
-        if chunk_type:
+        # ------------------------------------------------------------
+        # Chunk type
+        # ------------------------------------------------------------
 
+        if chunk_type:
             must_conditions.append(
                 FieldCondition(
                     key="chunk_type",
                     match=MatchValue(
                         value=chunk_type,
+                    ),
+                )
+            )
+
+        # ------------------------------------------------------------
+        # Exact page
+        # ------------------------------------------------------------
+
+        if page_number is not None:
+            must_conditions.append(
+                FieldCondition(
+                    key="page_number",
+                    match=MatchValue(
+                        value=page_number,
+                    ),
+                )
+            )
+
+        # ------------------------------------------------------------
+        # Exact image
+        # ------------------------------------------------------------
+
+        if image_id:
+            must_conditions.append(
+                FieldCondition(
+                    key="image_id",
+                    match=MatchValue(
+                        value=image_id,
                     ),
                 )
             )
@@ -287,14 +319,112 @@ class QdrantRepository:
             with_payload=True,
         )
 
+        return self._convert_results(
+            response.points
+        )
+
+    # ================================================================
+    # EXACT METADATA SEARCH
+    # ================================================================
+
+    def find_images(
+        self,
+        collection_name: str,
+        project_name: str | None = None,
+        document_name: str | None = None,
+        page_number: int | None = None,
+        image_id: str | None = None,
+        limit: int = 10,
+    ) -> list[RetrievedChunk]:
+        """
+        Retrieve image chunks using exact metadata.
+
+        No embedding/vector similarity is used.
+
+        This is the correct path for:
+            - exact image filename
+            - exact page image
+        """
+
+        must_conditions: list[FieldCondition] = [
+            FieldCondition(
+                key="chunk_type",
+                match=MatchValue(
+                    value="image",
+                ),
+            )
+        ]
+
+        if project_name:
+            must_conditions.append(
+                FieldCondition(
+                    key="project_name",
+                    match=MatchValue(
+                        value=project_name,
+                    ),
+                )
+            )
+
+        if document_name:
+            must_conditions.append(
+                FieldCondition(
+                    key="document_name",
+                    match=MatchValue(
+                        value=document_name,
+                    ),
+                )
+            )
+
+        if page_number is not None:
+            must_conditions.append(
+                FieldCondition(
+                    key="page_number",
+                    match=MatchValue(
+                        value=page_number,
+                    ),
+                )
+            )
+
+        if image_id:
+            must_conditions.append(
+                FieldCondition(
+                    key="image_id",
+                    match=MatchValue(
+                        value=image_id,
+                    ),
+                )
+            )
+
+        query_filter = Filter(
+            must=must_conditions
+        )
+
+        points, _ = self._client.scroll(
+            collection_name=collection_name,
+            scroll_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+        )
+
+        return self._convert_results(
+            points
+        )
+
+    # ================================================================
+    # RESULT CONVERSION
+    # ================================================================
+
+    @staticmethod
+    def _convert_results(
+        points,
+    ) -> list[RetrievedChunk]:
+
         results: list[RetrievedChunk] = []
 
-        for point in response.points:
+        for point in points:
 
             payload = point.payload or {}
 
-            # These are required document metadata.
-            # Do not invent fallback values if they are missing.
             project_id_value = payload.get(
                 "project_id"
             )
@@ -326,13 +456,19 @@ class QdrantRepository:
             ):
                 continue
 
+            score = getattr(
+                point,
+                "score",
+                0.0,
+            )
+
             results.append(
                 RetrievedChunk(
                     text=payload.get(
                         "text",
                         "",
                     ),
-                    score=point.score,
+                    score=score,
 
                     project_id=project_id_value,
                     project_name=project_name_value,
@@ -345,6 +481,7 @@ class QdrantRepository:
                         "page_number",
                         0,
                     ),
+
                     chunk_number=payload.get(
                         "chunk_number",
                         0,
@@ -353,6 +490,7 @@ class QdrantRepository:
                     heading=payload.get(
                         "heading"
                     ),
+
                     section=payload.get(
                         "section"
                     ),
@@ -365,10 +503,12 @@ class QdrantRepository:
                     table_id=payload.get(
                         "table_id"
                     ),
+
                     table_headers=payload.get(
                         "table_headers",
                         [],
                     ),
+
                     table_rows=payload.get(
                         "table_rows",
                         [],
@@ -377,6 +517,7 @@ class QdrantRepository:
                     image_id=payload.get(
                         "image_id"
                     ),
+
                     image_path=payload.get(
                         "image_path"
                     ),
@@ -390,14 +531,15 @@ class QdrantRepository:
 
         return results
 
+    # ================================================================
+    # DOCUMENT LISTING
+    # ================================================================
+
     def get_distinct_documents(
         self,
         collection_name: str | None = None,
         project_name: str | None = None,
     ) -> list[str]:
-        """
-        Return distinct document names, optionally scoped to a project.
-        """
 
         collection = (
             collection_name
@@ -457,13 +599,14 @@ class QdrantRepository:
         except Exception:
             return []
 
+    # ================================================================
+    # PROJECT LISTING
+    # ================================================================
+
     def get_distinct_projects(
         self,
         collection_name: str | None = None,
     ) -> list[str]:
-        """
-        Return distinct project names stored in Qdrant.
-        """
 
         collection = (
             collection_name

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 
 from app.chunking.chunk_models import (
     ChunkMetadata,
@@ -9,9 +8,6 @@ from app.chunking.chunk_models import (
 )
 from app.ingestion.extractors.raw_models import (
     RawDocument,
-    RawImageBlock,
-    RawTableBlock,
-    RawTextBlock,
 )
 from app.models.enums import BlockType
 
@@ -24,8 +20,7 @@ class ChunkGenerator:
     extractors produce normalized RawDocument objects.
 
     Project and document metadata are read dynamically from
-    RawDocument.metadata. No project, document, or file type is
-    hardcoded here.
+    RawDocument.metadata.
     """
 
     def generate(
@@ -90,6 +85,7 @@ class ChunkGenerator:
                 # =========================================================
 
                 if block.block_type == BlockType.TEXT:
+
                     text = getattr(
                         block,
                         "text",
@@ -134,6 +130,7 @@ class ChunkGenerator:
                 # =========================================================
 
                 elif block.block_type == BlockType.TABLE:
+
                     headers = getattr(
                         block,
                         "headers",
@@ -165,6 +162,7 @@ class ChunkGenerator:
                     normalized_rows: list[list[str]] = []
 
                     for row in rows:
+
                         normalized_row = [
                             str(cell).strip()
                             if cell is not None
@@ -246,6 +244,7 @@ class ChunkGenerator:
                 # =========================================================
 
                 elif block.block_type == BlockType.IMAGE:
+
                     image_name = getattr(
                         block,
                         "image_name",
@@ -258,11 +257,18 @@ class ChunkGenerator:
                         None,
                     )
 
-                    image_id = getattr(
-                        block,
-                        "image_id",
-                        None,
-                    )
+                    # IMPORTANT:
+                    #
+                    # RawImageBlock provides image_name.
+                    # Use that filename as the stable image identifier.
+                    #
+                    # Previously this code tried:
+                    #
+                    #     getattr(block, "image_id", None)
+                    #
+                    # which resulted in image_id=None in Qdrant.
+                    #
+                    image_id = image_name or None
 
                     caption = (
                         getattr(
@@ -346,6 +352,7 @@ class ChunkGenerator:
             )
 
         for row in rows:
+
             if not row:
                 continue
 

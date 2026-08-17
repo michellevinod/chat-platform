@@ -1,13 +1,25 @@
+from __future__ import annotations
+
 from app.agents.chat_agent import ChatAgent
-from app.agents.query_classifier import QueryIntent
+from app.agents.query_classifier import (
+    QueryClassifier,
+    QueryIntent,
+)
 
 
 class ChatService:
     """
     Main chat orchestration service.
 
-    Passes project/document scope from the API into the
-    document-intelligence agent.
+    Responsibilities:
+    - Validate the incoming query.
+    - Classify the query through the central QueryClassifier.
+    - Pass project/document scope into ChatAgent.
+    - Build citations.
+    - Render images using the public image endpoint.
+    - Return table and document responses.
+
+    The QueryClassifier is the single source of truth for query routing.
     """
 
     GREETINGS = {
@@ -17,10 +29,13 @@ class ChatService:
         "good morning",
         "good afternoon",
         "good evening",
+        "greetings",
+        "howdy",
     }
 
     def __init__(self) -> None:
         self._agent = ChatAgent()
+        self._classifier = QueryClassifier()
 
     def chat(
         self,
@@ -30,8 +45,17 @@ class ChatService:
         session_id: str | None = None,
         conversation_id: str | None = None,
     ) -> dict:
+        """
+        Process one document-chat request.
+
+        No LLM is called by this service itself.
+        """
 
         query = query.strip()
+
+        # ---------------------------------------------------------
+        # EMPTY QUERY
+        # ---------------------------------------------------------
 
         if not query:
             return {
@@ -39,7 +63,17 @@ class ChatService:
                 "message": "Query cannot be empty.",
             }
 
-        if self._is_greeting(query):
+        # ---------------------------------------------------------
+        # CENTRAL CLASSIFICATION
+        # ---------------------------------------------------------
+
+        intent = self._classifier.classify(query)
+
+        # ---------------------------------------------------------
+        # GREETING
+        # ---------------------------------------------------------
+
+        if intent == QueryIntent.GREETING:
             return {
                 "success": True,
                 "response": (
@@ -50,7 +84,11 @@ class ChatService:
                 "session_id": session_id,
             }
 
-        if self._is_out_of_scope(query):
+        # ---------------------------------------------------------
+        # OUT OF SCOPE
+        # ---------------------------------------------------------
+
+        if intent == QueryIntent.OUT_OF_SCOPE:
             return {
                 "success": True,
                 "response": (
@@ -61,15 +99,26 @@ class ChatService:
                 "session_id": session_id,
             }
 
+        # ---------------------------------------------------------
+        # DOCUMENT AGENT
+        # ---------------------------------------------------------
+
         agent_response = self._agent.execute(
             query=query,
             project_name=project_name,
             document_name=document_name,
         )
 
-        intent = agent_response["intent"]
+        agent_intent = agent_response.get(
+            "intent",
+            intent,
+        )
 
-        if intent in {
+        # ---------------------------------------------------------
+        # AGENT-LEVEL GREETING / OUT OF SCOPE
+        # ---------------------------------------------------------
+
+        if agent_intent in {
             QueryIntent.GREETING,
             QueryIntent.OUT_OF_SCOPE,
         }:
@@ -82,6 +131,10 @@ class ChatService:
                 "citations": [],
                 "session_id": session_id,
             }
+
+        # ---------------------------------------------------------
+        # RETRIEVED RESULTS
+        # ---------------------------------------------------------
 
         results = agent_response.get(
             "results",
@@ -99,57 +152,87 @@ class ChatService:
                 "session_id": session_id,
             }
 
-        # Keep the retrieved chunks available to the response
-        # builder instead of flattening them into plain strings.
-        citations = []
-
-        seen = set()
-
-        for chunk in results:
-            key = (
-                chunk.document_name,
-                chunk.page_number,
-                chunk.chunk_type,
-            )
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-
-            citations.append(
-                {
-                    "project": project_name,
-                    "document": chunk.document_name,
-                    "page": chunk.page_number,
-                    "source": chunk.source,
-                    "chunk_type": chunk.chunk_type,
-                }
-            )
-
         # ---------------------------------------------------------
         # IMAGE RESPONSE
         # ---------------------------------------------------------
 
-        if intent == QueryIntent.SEARCH_IMAGE:
+        if agent_intent == QueryIntent.SEARCH_IMAGE:
+
+            # For an image request, the first result is the
+            # selected/best image.
             chunk = results[0]
 
-            image_path = (
-                getattr(chunk, "image_path", None)
-                or getattr(chunk, "image_id", None)
+            image_path = getattr(
+                chunk,
+                "image_path",
+                None,
+            )
+
+            image_id = getattr(
+                chunk,
+                "image_id",
+                None,
+            )
+
+            image_name = self._extract_image_name(
+                image_path=image_path,
+                image_id=image_id,
+            )
+
+            # If an image was retrieved but we cannot determine
+            # its public filename, return a safe text response
+            # rather than exposing an internal filesystem path.
+            if not image_name:
+                return {
+                    "success": True,
+                    "response": (
+                        f"### Figure / Image\n\n"
+                        f"**Document:** "
+                        f"`{chunk.document_name}`  \n"
+                        f"**Page:** "
+                        f"{chunk.page_number}"
+                    ),
+                    "citations": [
+                        self._build_citation(
+                            chunk,
+                            project_name,
+                        )
+                    ],
+                    "session_id": session_id,
+                }
+
+            # Public API route.
+            #
+            # This is deliberately NOT:
+            #
+            # storage/images/...
+            #
+            # The frontend/browser can request:
+            #
+            # /images/<filename>
+            public_image_url = (
+                f"/images/{image_name}"
             )
 
             response = (
-                f"### Figure / Image\n\n"
-                f"**Document:** `{chunk.document_name}`  \n"
-                f"**Page:** {chunk.page_number}  \n\n"
-                f"![Figure]({image_path})"
+                "### Figure / Image\n\n"
+                f"**Document:** "
+                f"`{chunk.document_name}`  \n"
+                f"**Page:** "
+                f"{chunk.page_number}  \n\n"
+                f"![Figure]({public_image_url})"
+            )
+
+            # For one selected image, cite ONLY that image.
+            citation = self._build_citation(
+                chunk,
+                project_name,
             )
 
             return {
                 "success": True,
                 "response": response,
-                "citations": citations,
+                "citations": [citation],
                 "session_id": session_id,
             }
 
@@ -157,19 +240,44 @@ class ChatService:
         # TABLE RESPONSE
         # ---------------------------------------------------------
 
-        if intent == QueryIntent.SEARCH_TABLE:
+        if agent_intent == QueryIntent.SEARCH_TABLE:
+
             tables = []
 
+            # Keep the number of returned tables limited.
             for chunk in results[:2]:
+
+                table_text = getattr(
+                    chunk,
+                    "text",
+                    "",
+                ).strip()
+
+                if not table_text:
+                    continue
+
                 tables.append(
-                    f"### Table from `{chunk.document_name}` "
+                    f"### Table from "
+                    f"`{chunk.document_name}` "
                     f"(Page {chunk.page_number})\n\n"
-                    f"{chunk.text.strip()}"
+                    f"{table_text}"
                 )
+
+            citations = self._build_citations(
+                results,
+                project_name,
+            )
 
             return {
                 "success": True,
-                "response": "\n\n".join(tables),
+                "response": (
+                    "\n\n".join(tables)
+                    if tables
+                    else (
+                        "I couldn't find a usable table "
+                        "in the uploaded documents."
+                    )
+                ),
                 "citations": citations,
                 "session_id": session_id,
             }
@@ -182,63 +290,163 @@ class ChatService:
         seen_text = set()
 
         for chunk in results[:3]:
-            text = chunk.text.strip()
 
-            if not text or text in seen_text:
+            text = getattr(
+                chunk,
+                "text",
+                "",
+            ).strip()
+
+            if not text:
+                continue
+
+            if text in seen_text:
                 continue
 
             seen_text.add(text)
             unique_chunks.append(text)
 
+        citations = self._build_citations(
+            results,
+            project_name,
+        )
+
         return {
             "success": True,
-            "response": "\n\n".join(unique_chunks),
+            "response": "\n\n".join(
+                unique_chunks
+            ),
             "citations": citations,
             "session_id": session_id,
         }
 
-    def _is_greeting(
-        self,
-        query: str,
-    ) -> bool:
-        return query.lower() in self.GREETINGS
+    # =============================================================
+    # CITATIONS
+    # =============================================================
 
-    def _is_out_of_scope(
-        self,
-        query: str,
-    ) -> bool:
-        lowered = query.lower()
+    @staticmethod
+    def _build_citation(
+        chunk,
+        project_name: str | None,
+    ) -> dict:
+        """
+        Build a clean user-facing citation.
+        """
 
-        blocked = {
-            "capital of",
-            "capital city",
-            "weather in",
-            "weather today",
-            "weather",
-            "movie",
-            "recipe",
-            "how to cook",
-            "how to make",
-            "idli",
-            "dosa",
-            "cooking",
-            "football",
-            "cricket",
-            "ipl",
-            "fifa",
-            "president of",
-            "prime minister",
-            "election",
-            "politics",
-            "actor",
-            "actress",
-            "lyrics",
-            "tell me a joke",
-            "horoscope",
-            "bitcoin",
+        return {
+            "project": (
+                getattr(
+                    chunk,
+                    "project_name",
+                    None,
+                )
+                or project_name
+            ),
+            "document": getattr(
+                chunk,
+                "document_name",
+                None,
+            ),
+            "page": getattr(
+                chunk,
+                "page_number",
+                None,
+            ),
+            "source": getattr(
+                chunk,
+                "source",
+                "upload",
+            ),
+            "chunk_type": getattr(
+                chunk,
+                "chunk_type",
+                "text",
+            ),
         }
 
-        return any(
-            word in lowered
-            for word in blocked
+    def _build_citations(
+        self,
+        results,
+        project_name: str | None,
+    ) -> list[dict]:
+        """
+        Deduplicate citations by document/page/type.
+        """
+
+        citations = []
+        seen = set()
+
+        for chunk in results:
+
+            citation = self._build_citation(
+                chunk,
+                project_name,
+            )
+
+            key = (
+                citation["document"],
+                citation["page"],
+                citation["chunk_type"],
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            citations.append(
+                citation
+            )
+
+        return citations
+
+    # =============================================================
+    # IMAGE HELPERS
+    # =============================================================
+
+    @staticmethod
+    def _extract_image_name(
+        image_path: str | None,
+        image_id: str | None,
+    ) -> str | None:
+        """
+        Extract only the filename from image metadata.
+
+        Handles Windows paths and Unix-style paths.
+
+        Examples:
+
+            storage\\images\\img_abc.png
+            storage/images/img_abc.png
+            img_abc.png
+        """
+
+        candidate = (
+            image_path
+            or image_id
+        )
+
+        if not candidate:
+            return None
+
+        candidate = str(candidate).strip()
+
+        if not candidate:
+            return None
+
+        # Normalize Windows separators.
+        candidate = candidate.replace(
+            "\\",
+            "/",
+        )
+
+        # Return only the filename.
+        filename = candidate.rsplit(
+            "/",
+            1,
+        )[-1]
+
+        return (
+            filename
+            if filename
+            else None
         )
