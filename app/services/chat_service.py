@@ -1,40 +1,55 @@
 from __future__ import annotations
 
+from typing import Any
+
 from app.agents.chat_agent import ChatAgent
 from app.agents.query_classifier import (
     QueryClassifier,
     QueryIntent,
 )
+from app.services.llm_service import LLMService
 
 
 class ChatService:
     """
     Main chat orchestration service.
 
-    Responsibilities:
-    - Validate the incoming query.
-    - Classify the query through the central QueryClassifier.
-    - Pass project/document scope into ChatAgent.
-    - Build citations.
-    - Render images using the public image endpoint.
-    - Render structured tables as Markdown.
-    - Return normal document responses.
+    Retrieval-first architecture:
+
+        User Query
+            |
+            v
+        QueryClassifier
+            |
+            v
+        ChatAgent
+            |
+            v
+        Qdrant retrieval
+            |
+            +---- Image/Table -> direct rendering
+            |
+            +---- Factual -> direct grounded response
+            |
+            +---- Summary/Synthesis -> Gemini using retrieved evidence
+
+    Important:
+    Gemini is NEVER given the original document directly.
+    Gemini receives only retrieved evidence from Qdrant.
     """
 
-    GREETINGS = {
-        "hi",
-        "hello",
-        "hey",
-        "good morning",
-        "good afternoon",
-        "good evening",
-        "greetings",
-        "howdy",
-    }
+    NO_RESULTS_MESSAGE = (
+        "I couldn't find relevant information in the uploaded documents."
+    )
 
     def __init__(self) -> None:
         self._agent = ChatAgent()
         self._classifier = QueryClassifier()
+        self._llm = LLMService()
+
+    # =================================================================
+    # MAIN CHAT ENTRY POINT
+    # =================================================================
 
     def chat(
         self,
@@ -47,14 +62,19 @@ class ChatService:
         """
         Process one document-chat request.
 
-        No LLM is called by this service itself.
+        The service is retrieval-first.
+
+        Simple factual questions do NOT call Gemini.
+
+        Gemini is used only when the query genuinely requires
+        synthesis, summarization, comparison, or explanation.
         """
 
-        query = query.strip()
+        query = (query or "").strip()
 
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
         # EMPTY QUERY
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
 
         if not query:
             return {
@@ -62,15 +82,15 @@ class ChatService:
                 "message": "Query cannot be empty.",
             }
 
-        # ---------------------------------------------------------
-        # CENTRAL CLASSIFICATION
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # CLASSIFY
+        # -------------------------------------------------------------
 
         intent = self._classifier.classify(query)
 
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
         # GREETING
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
 
         if intent == QueryIntent.GREETING:
             return {
@@ -83,9 +103,9 @@ class ChatService:
                 "session_id": session_id,
             }
 
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
         # OUT OF SCOPE
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
 
         if intent == QueryIntent.OUT_OF_SCOPE:
             return {
@@ -98,9 +118,9 @@ class ChatService:
                 "session_id": session_id,
             }
 
-        # ---------------------------------------------------------
-        # DOCUMENT AGENT
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # RETRIEVE EVIDENCE
+        # -------------------------------------------------------------
 
         agent_response = self._agent.execute(
             query=query,
@@ -113,9 +133,9 @@ class ChatService:
             intent,
         )
 
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
         # AGENT-LEVEL GREETING / OUT OF SCOPE
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
 
         if agent_intent in {
             QueryIntent.GREETING,
@@ -124,182 +144,172 @@ class ChatService:
             return {
                 "success": True,
                 "response": agent_response.get(
-                    "response",
-                    "",
+                    "direct_response",
+                    agent_response.get("response", ""),
                 ),
                 "citations": [],
                 "session_id": session_id,
             }
 
-        # ---------------------------------------------------------
-        # RETRIEVED RESULTS
-        # ---------------------------------------------------------
+        results = agent_response.get("results") or []
 
-        results = agent_response.get(
-            "results",
-            [],
-        )
+        # -------------------------------------------------------------
+        # NO EVIDENCE
+        # -------------------------------------------------------------
 
         if not results:
-            return {
-                "success": True,
-                "response": (
-                    "I couldn't find relevant information "
-                    "in the uploaded documents."
-                ),
-                "citations": [],
-                "session_id": session_id,
-            }
+            return self._no_results(
+                session_id=session_id,
+                original_question=query,
+            )
 
-        # ---------------------------------------------------------
-        # IMAGE RESPONSE
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # IMAGE
+        # -------------------------------------------------------------
 
         if agent_intent == QueryIntent.SEARCH_IMAGE:
-
-            # For an image request, the first result is the
-            # selected/best image.
-            chunk = results[0]
-
-            image_path = getattr(
-                chunk,
-                "image_path",
-                None,
+            return self._build_image_response(
+                results=results,
+                project_name=project_name,
+                session_id=session_id,
             )
 
-            image_id = getattr(
-                chunk,
-                "image_id",
-                None,
-            )
-
-            image_name = self._extract_image_name(
-                image_path=image_path,
-                image_id=image_id,
-            )
-
-            # If an image was retrieved but we cannot determine
-            # its public filename, return a safe text response
-            # rather than exposing an internal filesystem path.
-            if not image_name:
-                return {
-                    "success": True,
-                    "response": (
-                        "### Figure / Image\n\n"
-                        f"**Document:** "
-                        f"`{chunk.document_name}`  \n"
-                        f"**Page:** "
-                        f"{chunk.page_number}"
-                    ),
-                    "citations": [
-                        self._build_citation(
-                            chunk,
-                            project_name,
-                        )
-                    ],
-                    "session_id": session_id,
-                }
-
-            # Public API route.
-            #
-            # The frontend/browser can request:
-            #
-            # /images/<filename>
-            public_image_url = (
-                f"/images/{image_name}"
-            )
-
-            response = (
-                "### Figure / Image\n\n"
-                f"**Document:** "
-                f"`{chunk.document_name}`  \n"
-                f"**Page:** "
-                f"{chunk.page_number}  \n\n"
-                f"![Figure]({public_image_url})"
-            )
-
-            # For one selected image, cite ONLY that image.
-            citation = self._build_citation(
-                chunk,
-                project_name,
-            )
-
-            return {
-                "success": True,
-                "response": response,
-                "citations": [citation],
-                "session_id": session_id,
-            }
-
-        # ---------------------------------------------------------
-        # TABLE RESPONSE
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # TABLE
+        # -------------------------------------------------------------
 
         if agent_intent == QueryIntent.SEARCH_TABLE:
-
-            tables = []
-
-            # Keep the number of returned tables limited.
-            for chunk in results[:2]:
-
-                markdown_table = (
-                    self._render_table_markdown(
-                        chunk
-                    )
-                )
-
-                if not markdown_table:
-                    continue
-
-                tables.append(
-                    f"### Table from "
-                    f"`{chunk.document_name}` "
-                    f"(Page {chunk.page_number})\n\n"
-                    f"{markdown_table}"
-                )
-
-            citations = self._build_citations(
-                results,
-                project_name,
+            return self._build_table_response(
+                results=results,
+                project_name=project_name,
+                session_id=session_id,
             )
 
-            return {
-                "success": True,
-                "response": (
-                    "\n\n".join(tables)
-                    if tables
-                    else (
-                        "I couldn't find a usable table "
-                        "in the uploaded documents."
-                    )
-                ),
-                "citations": citations,
-                "session_id": session_id,
-            }
+        # -------------------------------------------------------------
+        # SUMMARY / SYNTHESIS
+        #
+        # These are the cases where Gemini is actually useful.
+        # Gemini receives ONLY retrieved evidence.
+        # -------------------------------------------------------------
 
-        # ---------------------------------------------------------
-        # NORMAL DOCUMENT RESPONSE
-        # ---------------------------------------------------------
+        if agent_intent in {
+            QueryIntent.DOCUMENT_SUMMARY,
+            QueryIntent.PROJECT_SUMMARY,
+            QueryIntent.RAG_SYNTHESIS,
+        }:
+            return self._build_synthesis_response(
+                query=query,
+                results=results,
+                project_name=project_name,
+                session_id=session_id,
+            )
 
-        unique_chunks = []
-        seen_text = set()
+        # -------------------------------------------------------------
+        # NORMAL FACTUAL / SEARCH RESPONSE
+        #
+        # IMPORTANT:
+        # Do NOT concatenate several unrelated chunks.
+        #
+        # The top result is the highest-ranked evidence returned by
+        # the retrieval layer.
+        # -------------------------------------------------------------
 
-        for chunk in results[:3]:
+        return self._build_factual_response(
+            query=query,
+            results=results,
+            project_name=project_name,
+            session_id=session_id,
+        )
 
-            text = getattr(
-                chunk,
-                "text",
-                "",
-            ).strip()
+    # =================================================================
+    # FACTUAL RESPONSE
+    # =================================================================
 
-            if not text:
-                continue
+    def _build_factual_response(
+        self,
+        query: str,
+        results: list[Any],
+        project_name: str | None,
+        session_id: str | None,
+    ) -> dict:
+        """
+        Return the strongest retrieved evidence directly.
 
-            if text in seen_text:
-                continue
+        No LLM call is made here.
 
-            seen_text.add(text)
-            unique_chunks.append(text)
+        This is intentional:
+        - conserves Gemini quota
+        - avoids unnecessary hallucination
+        - preserves exact document wording
+        - keeps factual retrieval deterministic
+        """
+
+        best_chunk = self._select_best_chunk(results)
+
+        if best_chunk is None:
+            return self._no_results(
+                session_id=session_id,
+                original_question=query,
+            )
+
+        text = self._clean_response_text(
+            getattr(best_chunk, "text", "")
+        )
+
+        if not text:
+            return self._no_results(
+                session_id=session_id,
+                original_question=query,
+            )
+
+        citations = self._build_citations(
+            [best_chunk],
+            project_name,
+        )
+
+        return {
+            "success": True,
+            "response": text,
+            "citations": citations,
+            "session_id": session_id,
+        }
+
+    # =================================================================
+    # SYNTHESIS RESPONSE
+    # =================================================================
+
+    def _build_synthesis_response(
+        self,
+        query: str,
+        results: list[Any],
+        project_name: str | None,
+        session_id: str | None,
+    ) -> dict:
+        """
+        Use Gemini only for genuine synthesis.
+
+        The model receives retrieved evidence and nothing else.
+        """
+
+        evidence = self._build_llm_context(results)
+
+        if not evidence.strip():
+            return self._no_results(
+                session_id=session_id,
+                original_question=query,
+            )
+
+        response_text = self._llm.generate_answer(
+            question=query,
+            context=evidence,
+        )
+
+        # The LLM service already has a safe fallback.
+        if not response_text or not response_text.strip():
+            return self._no_results(
+                session_id=session_id,
+                original_question=query,
+            )
 
         citations = self._build_citations(
             results,
@@ -308,45 +318,317 @@ class ChatService:
 
         return {
             "success": True,
-            "response": "\n\n".join(
-                unique_chunks
-            ),
+            "response": response_text.strip(),
             "citations": citations,
             "session_id": session_id,
         }
 
-    # =============================================================
-    # TABLE RENDERING
-    # =============================================================
+    # =================================================================
+    # LLM CONTEXT
+    # =================================================================
+
+    @staticmethod
+    def _build_llm_context(
+        results: list[Any],
+    ) -> str:
+        """
+        Convert retrieved chunks into a controlled evidence context.
+
+        Internal database identifiers are deliberately excluded.
+        """
+
+        sections: list[str] = []
+        seen: set[tuple] = set()
+
+        # Limit evidence so we do not waste Gemini quota sending
+        # excessive duplicate material.
+        for index, chunk in enumerate(results[:12], start=1):
+            text = ChatService._clean_response_text(
+                getattr(chunk, "text", "")
+            )
+
+            if not text:
+                continue
+
+            document = getattr(
+                chunk,
+                "document_name",
+                None,
+            )
+
+            page = getattr(
+                chunk,
+                "page_number",
+                None,
+            )
+
+            chunk_type = getattr(
+                chunk,
+                "chunk_type",
+                None,
+            ) or "text"
+
+            key = (
+                document,
+                page,
+                chunk_type,
+                text,
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            location_parts = []
+
+            if document:
+                location_parts.append(
+                    f"Document: {document}"
+                )
+
+            if page is not None:
+                location_parts.append(
+                    f"Page: {page}"
+                )
+
+            location_parts.append(
+                f"Type: {chunk_type}"
+            )
+
+            location = " | ".join(
+                location_parts
+            )
+
+            sections.append(
+                f"[Evidence {index}]\n"
+                f"{location}\n"
+                f"{text}"
+            )
+
+        return "\n\n".join(sections)
+
+    # =================================================================
+    # IMAGE RESPONSE
+    # =================================================================
+
+    def _build_image_response(
+        self,
+        results: list[Any],
+        project_name: str | None,
+        session_id: str | None,
+    ) -> dict:
+        """
+        Render the best retrieved image.
+
+        Only the public filename is exposed.
+        Internal filesystem paths are never returned.
+        """
+
+        chunk = results[0]
+
+        image_path = getattr(
+            chunk,
+            "image_path",
+            None,
+        )
+
+        image_id = getattr(
+            chunk,
+            "image_id",
+            None,
+        )
+
+        image_name = self._extract_image_name(
+            image_path=image_path,
+            image_id=image_id,
+        )
+
+        citation = self._build_citation(
+            chunk,
+            project_name,
+        )
+
+        # -------------------------------------------------------------
+        # Image metadata exists but no public filename
+        # -------------------------------------------------------------
+
+        if not image_name:
+            return {
+                "success": True,
+                "response": (
+                    "### Figure / Image\n\n"
+                    f"**Document:** "
+                    f"`{getattr(chunk, 'document_name', 'Unknown')}`  \n"
+                    f"**Page:** "
+                    f"{getattr(chunk, 'page_number', 'Unknown')}"
+                ),
+                "citations": [citation],
+                "session_id": session_id,
+            }
+
+        # -------------------------------------------------------------
+        # Public image endpoint
+        # -------------------------------------------------------------
+
+        public_image_url = (
+            f"/images/{image_name}"
+        )
+
+        document_name = getattr(
+            chunk,
+            "document_name",
+            None,
+        )
+
+        page_number = getattr(
+            chunk,
+            "page_number",
+            None,
+        )
+
+        response = (
+            "### Figure / Image\n\n"
+            f"**Document:** `{document_name}`  \n"
+            f"**Page:** {page_number}  \n\n"
+            f"![Figure]({public_image_url})"
+        )
+
+        return {
+            "success": True,
+            "response": response,
+            "citations": [citation],
+            "session_id": session_id,
+        }
+
+    # =================================================================
+    # TABLE RESPONSE
+    # =================================================================
+
+    def _build_table_response(
+        self,
+        results: list[Any],
+        project_name: str | None,
+        session_id: str | None,
+    ) -> dict:
+        """
+        Render structured table data directly.
+
+        Tables do not need Gemini for normal retrieval/display.
+        """
+
+        tables: list[str] = []
+
+        seen: set[tuple] = set()
+
+        for chunk in results[:3]:
+            document_name = getattr(
+                chunk,
+                "document_name",
+                None,
+            )
+
+            page_number = getattr(
+                chunk,
+                "page_number",
+                None,
+            )
+
+            table_id = getattr(
+                chunk,
+                "table_id",
+                None,
+            )
+
+            key = (
+                document_name,
+                page_number,
+                table_id,
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            markdown_table = (
+                self._render_table_markdown(
+                    chunk
+                )
+            )
+
+            if not markdown_table:
+                continue
+
+            tables.append(
+                f"### Table from `{document_name}` "
+                f"(Page {page_number})\n\n"
+                f"{markdown_table}"
+            )
+
+        if not tables:
+            return {
+                "success": True,
+                "response": (
+                    "I couldn't find a usable table "
+                    "in the uploaded documents."
+                ),
+                "citations": [],
+                "session_id": session_id,
+            }
+
+        citations = self._build_citations(
+            results,
+            project_name,
+        )
+
+        return {
+            "success": True,
+            "response": "\n\n".join(tables),
+            "citations": citations,
+            "session_id": session_id,
+        }
+
+    # =================================================================
+    # TABLE MARKDOWN
+    # =================================================================
 
     @staticmethod
     def _render_table_markdown(
         chunk,
     ) -> str:
         """
-        Render a retrieved table using its structured headers
-        and rows instead of the flattened semantic-search text.
+        Render structured table data.
 
-        The semantic-search text is intended for retrieval.
-        table_headers/table_rows are the canonical user-facing
-        representation.
+        Preferred source:
+            table_headers
+            table_rows
+
+        Fallback:
+            chunk.text
         """
 
-        headers = getattr(
-            chunk,
-            "table_headers",
-            None,
-        ) or []
+        headers = (
+            getattr(
+                chunk,
+                "table_headers",
+                None,
+            )
+            or []
+        )
 
-        rows = getattr(
-            chunk,
-            "table_rows",
-            None,
-        ) or []
+        rows = (
+            getattr(
+                chunk,
+                "table_rows",
+                None,
+            )
+            or []
+        )
 
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
         # Normalize headers
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
 
         headers = [
             ChatService._clean_table_cell(
@@ -355,14 +637,13 @@ class ChatService:
             for header in headers
         ]
 
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
         # Normalize rows
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
 
         normalized_rows = []
 
         for row in rows:
-
             if not row:
                 continue
 
@@ -373,7 +654,6 @@ class ChatService:
                 for cell in row
             ]
 
-            # Ignore completely empty rows.
             if not any(
                 cell.strip()
                 for cell in normalized_row
@@ -384,9 +664,9 @@ class ChatService:
                 normalized_row
             )
 
-        # ---------------------------------------------------------
-        # Determine table width
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # Determine width
+        # -------------------------------------------------------------
 
         column_count = max(
             [len(headers)]
@@ -397,21 +677,24 @@ class ChatService:
             + [0]
         )
 
-        # If structured data is unavailable,
-        # fall back to the original table text.
+        # -------------------------------------------------------------
+        # Structured data unavailable
+        # -------------------------------------------------------------
+
         if column_count == 0:
             return (
-                getattr(
-                    chunk,
-                    "text",
-                    "",
+                ChatService._clean_response_text(
+                    getattr(
+                        chunk,
+                        "text",
+                        "",
+                    )
                 )
-                or ""
-            ).strip()
+            )
 
-        # ---------------------------------------------------------
-        # Missing headers
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # Create generic headers when needed
+        # -------------------------------------------------------------
 
         if not headers:
             headers = [
@@ -421,7 +704,6 @@ class ChatService:
                 )
             ]
 
-        # Pad headers if necessary.
         if len(headers) < column_count:
             headers.extend(
                 [
@@ -433,9 +715,9 @@ class ChatService:
                 ]
             )
 
-        # ---------------------------------------------------------
-        # Markdown header
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # Markdown
+        # -------------------------------------------------------------
 
         lines = []
 
@@ -458,12 +740,7 @@ class ChatService:
             + " |"
         )
 
-        # ---------------------------------------------------------
-        # Markdown rows
-        # ---------------------------------------------------------
-
         for row in normalized_rows:
-
             if len(row) < column_count:
                 row = row + [
                     ""
@@ -484,12 +761,16 @@ class ChatService:
 
         return "\n".join(lines)
 
+    # =================================================================
+    # TABLE CELL CLEANING
+    # =================================================================
+
     @staticmethod
     def _clean_table_cell(
         value,
     ) -> str:
         """
-        Normalize one table cell for Markdown output.
+        Normalize a single table cell.
         """
 
         if value is None:
@@ -497,12 +778,10 @@ class ChatService:
 
         text = str(value)
 
-        # Collapse line breaks and repeated whitespace.
         text = " ".join(
             text.split()
         )
 
-        # Escape Markdown column separators.
         text = text.replace(
             "|",
             "\\|",
@@ -510,9 +789,104 @@ class ChatService:
 
         return text
 
-    # =============================================================
+    # =================================================================
+    # BEST RESULT SELECTION
+    # =================================================================
+
+    @staticmethod
+    def _select_best_chunk(
+        results: list[Any],
+    ) -> Any | None:
+        """
+        Select the highest-ranked usable text result.
+
+        Qdrant returns results ordered by relevance, so the first
+        usable text chunk is preferred.
+
+        Image/table chunks are skipped for normal factual responses.
+        """
+
+        for chunk in results:
+            chunk_type = (
+                getattr(
+                    chunk,
+                    "chunk_type",
+                    None,
+                )
+                or "text"
+            ).lower()
+
+            if chunk_type in {
+                "image",
+                "table",
+            }:
+                continue
+
+            text = (
+                getattr(
+                    chunk,
+                    "text",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if text:
+                return chunk
+
+        return None
+
+    # =================================================================
+    # RESPONSE TEXT CLEANING
+    # =================================================================
+
+    @staticmethod
+    def _clean_response_text(
+        text: Any,
+    ) -> str:
+        """
+        Clean retrieved text before showing it to the user.
+
+        This does NOT rewrite or summarize document content.
+        """
+
+        if text is None:
+            return ""
+
+        text = str(text).strip()
+
+        if not text:
+            return ""
+
+        # Normalize excessive blank lines.
+        lines = [
+            line.rstrip()
+            for line in text.splitlines()
+        ]
+
+        cleaned_lines = []
+
+        previous_blank = False
+
+        for line in lines:
+            if not line.strip():
+                if previous_blank:
+                    continue
+
+                cleaned_lines.append("")
+                previous_blank = True
+                continue
+
+            cleaned_lines.append(line)
+            previous_blank = False
+
+        return "\n".join(
+            cleaned_lines
+        ).strip()
+
+    # =================================================================
     # CITATIONS
-    # =============================================================
+    # =================================================================
 
     @staticmethod
     def _build_citation(
@@ -521,6 +895,8 @@ class ChatService:
     ) -> dict:
         """
         Build a clean user-facing citation.
+
+        Internal database IDs and filesystem paths are excluded.
         """
 
         return {
@@ -556,7 +932,7 @@ class ChatService:
 
     def _build_citations(
         self,
-        results,
+        results: list[Any],
         project_name: str | None,
     ) -> list[dict]:
         """
@@ -567,7 +943,6 @@ class ChatService:
         seen = set()
 
         for chunk in results:
-
             citation = self._build_citation(
                 chunk,
                 project_name,
@@ -583,15 +958,33 @@ class ChatService:
                 continue
 
             seen.add(key)
-            citations.append(
-                citation
-            )
+            citations.append(citation)
 
         return citations
 
-    # =============================================================
+    # =================================================================
+    # NO RESULTS
+    # =================================================================
+
+    def _no_results(
+        self,
+        session_id: str | None,
+        original_question: str,
+    ) -> dict:
+        """
+        Safe response when retrieval produced no usable evidence.
+        """
+
+        return {
+            "success": True,
+            "response": self.NO_RESULTS_MESSAGE,
+            "citations": [],
+            "session_id": session_id,
+        }
+
+    # =================================================================
     # IMAGE HELPERS
-    # =============================================================
+    # =================================================================
 
     @staticmethod
     def _extract_image_name(
@@ -599,15 +992,15 @@ class ChatService:
         image_id: str | None,
     ) -> str | None:
         """
-        Extract only the filename from image metadata.
+        Extract ONLY the public image filename.
 
-        Handles Windows paths and Unix-style paths.
-
-        Examples:
+        Handles:
 
             storage\\images\\img_abc.png
             storage/images/img_abc.png
             img_abc.png
+
+        Never returns the internal directory path.
         """
 
         candidate = (
@@ -625,13 +1018,11 @@ class ChatService:
         if not candidate:
             return None
 
-        # Normalize Windows separators.
         candidate = candidate.replace(
             "\\",
             "/",
         )
 
-        # Return only the filename.
         filename = candidate.rsplit(
             "/",
             1,

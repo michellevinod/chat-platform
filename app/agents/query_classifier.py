@@ -1,42 +1,36 @@
-from enum import Enum
+from __future__ import annotations
+
 import re
+from enum import Enum
 
 
 class QueryIntent(str, Enum):
     GREETING = "greeting"
-
     OUT_OF_SCOPE = "out_of_scope"
 
     DOCUMENT_SUMMARY = "document_summary"
-
     PROJECT_SUMMARY = "project_summary"
 
     SEARCH_TABLE = "search_table"
-
     SEARCH_IMAGE = "search_image"
 
     AMBIGUOUS_DOCUMENT = "ambiguous_document"
 
     RAG_FACTUAL = "rag_factual"
-
     RAG_SYNTHESIS = "rag_synthesis"
-
     RAG_SEARCH = "rag_search"
 
 
 class QueryClassifier:
     """
-    Classifies document-chat queries before retrieval.
+    Classifies document-chat queries without relying on any
+    domain-specific vocabulary.
 
-    The classifier is intentionally deterministic for routing decisions.
-    It does not call an LLM.
-
-    Image queries are recognized from:
-    - image-related words
-    - figure-related words
-    - image filenames
-    - image extensions
-    - explicit page + image requests
+    Important design rule:
+    A word such as "cricket", "weather", "oil", "medicine",
+    "finance", etc. may legitimately exist inside an uploaded
+    document. Therefore vocabulary alone must never determine
+    that a query is out of scope.
     """
 
     GREETINGS = {
@@ -50,37 +44,20 @@ class QueryClassifier:
         "howdy",
     }
 
-    BLOCKED = {
-        "capital of",
-        "capital city",
-        "weather in",
-        "weather today",
-        "weather",
-        "movie",
-        "recipe",
-        "how to cook",
-        "how to make",
-        "idli",
-        "dosa",
-        "cooking",
-        "football",
-        "cricket",
-        "ipl",
-        "fifa",
-        "president of",
-        "prime minister",
-        "election",
-        "politics",
-        "actor",
-        "actress",
-        "lyrics",
-        "tell me a joke",
-        "horoscope",
-        "bitcoin",
-    }
+    SUMMARY_PHRASES = (
+    "what is this document about",
+    "what does this document cover",
+    "what does the document cover",
+    "what is the document about",
+    "give me an overview",
+    "give an overview",
+    "provide an overview",
+    "overview of the document",
+    )
 
-    SYNTHESIS_KEYWORDS = {
+    SYNTHESIS_TERMS = {
         "summarize",
+        "summarise",
         "summary",
         "overview",
         "compare",
@@ -92,237 +69,188 @@ class QueryClassifier:
         "analysis",
         "explain",
         "synthesize",
+        "synthesise",
         "relationship",
+        "relationships",
         "insights",
         "evaluate",
+        "evaluation",
         "pros and cons",
+        "advantages and disadvantages",
+        "contrast",
     }
 
-    IMAGE_KEYWORDS = {
+    TABLE_TERMS = {
+        "table",
+        "tables",
+        "tabular",
+        "spreadsheet",
+    }
+
+    IMAGE_TERMS = {
         "image",
         "images",
         "figure",
-        "fig.",
-        "fig ",
+        "figures",
         "diagram",
+        "diagrams",
         "photo",
-        "photograph",
-        "picture",
-        "pictures",
-        "illustration",
+        "photos",
         "chart",
+        "charts",
         "graph",
-        "plot",
-        "show me the image",
-        "show the image",
-        "show me a figure",
-        "show the figure",
-        "display the image",
-        "display the figure",
+        "graphs",
     }
 
-    IMAGE_EXTENSIONS = {
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".webp",
-        ".gif",
-        ".bmp",
-    }
+    @classmethod
+    def classify(cls, query: str) -> QueryIntent:
+        """
+        Determine the routing intent for a document query.
 
-    def classify(
-        self,
-        query: str,
-    ) -> QueryIntent:
+        This classifier intentionally does NOT maintain a list of
+        forbidden domain words. Whether a question is answerable
+        must ultimately be determined by document retrieval/evidence,
+        not by the vocabulary used in the question.
+        """
 
-        lowered = query.lower().strip()
+        lowered = " ".join(
+            (query or "").lower().strip().split()
+        )
+
+        if not lowered:
+            return QueryIntent.RAG_FACTUAL
 
         # ---------------------------------------------------------
-        # Greeting
+        # GREETING
         # ---------------------------------------------------------
 
-        if lowered in self.GREETINGS:
+        if lowered in cls.GREETINGS:
             return QueryIntent.GREETING
 
         # ---------------------------------------------------------
-        # Out of scope
-        # ---------------------------------------------------------
-
-        if any(
-            word in lowered
-            for word in self.BLOCKED
-        ):
-            return QueryIntent.OUT_OF_SCOPE
-
-        # ---------------------------------------------------------
-        # Explicit image filename
-        #
-        # Examples:
-        #
-        # img_f28db4f9_p37_2.png
-        # figure_01.jpg
-        # diagram.webp
-        # ---------------------------------------------------------
-
-        if QueryClassifier._contains_image_filename(
-            lowered
-        ):
-            return QueryIntent.SEARCH_IMAGE
-
-        # ---------------------------------------------------------
-        # Explicit page + image request
-        #
-        # Examples:
-        #
-        # image on page 44
-        # figure on page 18
-        # picture from page 32
-        # show page 50 image
-        # ---------------------------------------------------------
-
-        if (
-            QueryClassifier._contains_page_reference(
-                lowered
-            )
-            and any(
-                keyword in lowered
-                for keyword in {
-                    "image",
-                    "figure",
-                    "diagram",
-                    "photo",
-                    "picture",
-                    "chart",
-                    "graph",
-            }
-            )
-        ):
-            return QueryIntent.SEARCH_IMAGE
-
-        # ---------------------------------------------------------
-        # Project summary
+        # PROJECT SUMMARY
         # ---------------------------------------------------------
 
         if (
             "project summary" in lowered
+            or "summary of the project" in lowered
             or "summarize project" in lowered
+            or "summarise project" in lowered
+            or "overview of the project" in lowered
         ):
             return QueryIntent.PROJECT_SUMMARY
 
         # ---------------------------------------------------------
-        # Ambiguous summary
+        # AMBIGUOUS SUMMARY
+        #
+        # "summarize" by itself needs document/project context.
+        # The agent/service can resolve that from the selected scope.
         # ---------------------------------------------------------
 
-        if (
-            lowered == "summarize"
-            or lowered == "summary"
-            or lowered == "summarize this"
-            or lowered == "overview"
-            or lowered == "give me a summary"
-            or lowered == "summarize the document"
-        ):
+        if lowered in {
+            "summarize",
+            "summarise",
+            "summary",
+            "summarize this",
+            "summarise this",
+            "overview",
+            "give me a summary",
+            "give me an overview",
+            "summarize the document",
+            "summarise the document",
+            "overview of the document",
+        }:
             return QueryIntent.AMBIGUOUS_DOCUMENT
 
         # ---------------------------------------------------------
-        # Document summary
+        # DOCUMENT SUMMARY
         # ---------------------------------------------------------
 
-        if any(
-            keyword in lowered
-            for keyword in [
-                "summary",
-                "summarize",
-                "overview",
-            ]
+        if cls._contains_any(
+            lowered,
+            cls.SUMMARY_PHRASES,
         ):
             return QueryIntent.DOCUMENT_SUMMARY
 
         # ---------------------------------------------------------
-        # Table
+        # TABLE
         # ---------------------------------------------------------
 
-        if any(
-            keyword in lowered
-            for keyword in [
-                "table",
-                "tabular",
-                "spreadsheet",
-            ]
+        if cls._contains_any(
+            lowered,
+            cls.TABLE_TERMS,
         ):
             return QueryIntent.SEARCH_TABLE
 
         # ---------------------------------------------------------
-        # Image / figure / diagram
+        # IMAGE / FIGURE
         # ---------------------------------------------------------
 
-        if any(
-            keyword in lowered
-            for keyword in self.IMAGE_KEYWORDS
+        if cls._contains_any(
+            lowered,
+            cls.IMAGE_TERMS,
         ):
             return QueryIntent.SEARCH_IMAGE
 
         # ---------------------------------------------------------
-        # Synthesis
+        # SYNTHESIS / REASONING
         # ---------------------------------------------------------
 
-        if any(
-            keyword in lowered
-            for keyword in self.SYNTHESIS_KEYWORDS
+        if cls._contains_any_phrase(
+            lowered,
+            cls.SYNTHESIS_TERMS,
         ):
             return QueryIntent.RAG_SYNTHESIS
 
         # ---------------------------------------------------------
-        # Default factual document search
+        # DEFAULT
         # ---------------------------------------------------------
 
         return QueryIntent.RAG_FACTUAL
 
     @staticmethod
-    def _contains_page_reference(
-        query: str,
+    def _contains_any(
+        text: str,
+        terms: set[str],
     ) -> bool:
         """
-        Detect explicit page references.
-
-        Examples:
-            page 44
-            page 18
-            pg 12
-            p. 37
+        Match complete words/phrases instead of arbitrary substrings.
         """
 
-        return bool(
-            re.search(
-                r"\b(?:page|pages|pg|p\.)\s*\d+\b",
-                query,
-            )
-        )
+        for term in terms:
+            if " " in term:
+                if term in text:
+                    return True
+                continue
 
-    @classmethod
-    def _contains_image_filename(
-        cls,
-        query: str,
-    ) -> bool:
-        """
-        Detect an image filename or path.
-
-        Examples:
-            img_f28db4f9_p37_2.png
-            figure_1.jpg
-            diagram.webp
-            storage/images/test.png
-        """
-
-        for extension in cls.IMAGE_EXTENSIONS:
-            if extension in query:
+            if re.search(
+                rf"\b{re.escape(term)}\b",
+                text,
+            ):
                 return True
 
-        # Also recognize common image identifiers even if the
-        # extension has been omitted.
-        if re.search(
-            r"\bimg[_-][a-z0-9_-]+\b",
-            query,
-        ):
-            return True
+        return False
+
+    @staticmethod
+    def _contains_any_phrase(
+        text: str,
+        terms: set[str],
+    ) -> bool:
+        """
+        Match synthesis expressions while avoiding accidental
+        substring matches.
+        """
+
+        for term in terms:
+            if " " in term:
+                if term in text:
+                    return True
+                continue
+
+            if re.search(
+                rf"\b{re.escape(term)}\b",
+                text,
+            ):
+                return True
 
         return False

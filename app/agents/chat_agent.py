@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from app.agents.base_agent import BaseAgent
-from app.agents.query_classifier import (
-    QueryClassifier,
-    QueryIntent,
-)
+from app.agents.query_classifier import QueryClassifier, QueryIntent
 from app.agents.query_enhancer import QueryEnhancer
 from app.rag.rag_tool import RAGTool
 from app.services.image_service import ImageService
@@ -15,151 +13,321 @@ from app.services.table_service import TableService
 
 class ChatAgent(BaseAgent):
     """
-    Main document-intelligence orchestration agent.
+    Main document-chat agent.
 
-    Routes document queries according to their intent so that
-    images and tables do not get mixed with ordinary text retrieval.
-
-    Explicit page references are extracted from the user's query
-    and passed as exact metadata filters instead of relying on
-    semantic similarity.
+    Routes user queries to the appropriate retrieval mechanism:
+    - images -> ImageService
+    - tables -> TableService
+    - normal questions -> RAGTool
+    - summaries/synthesis -> broad RAG retrieval
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        rag_tool: RAGTool | None = None,
+        image_service: ImageService | None = None,
+        table_service: TableService | None = None,
+    ) -> None:
+        super().__init__()
+
         self._classifier = QueryClassifier()
         self._enhancer = QueryEnhancer()
-        self._rag = RAGTool()
-        self._image_service = ImageService()
-        self._table_service = TableService()
+
+        self._rag = rag_tool or RAGTool()
+        self._image_service = image_service or ImageService()
+        self._table_service = table_service or TableService()
+
+    # =================================================================
+    # MAIN EXECUTION
+    # =================================================================
 
     def execute(
         self,
         query: str,
         project_name: str | None = None,
         document_name: str | None = None,
-    ):
+        project_id: str | None = None,
+        document_id: str | None = None,
+    ) -> dict[str, Any]:
+
+        query = (query or "").strip()
+
+        if not query:
+            return {
+                "intent": QueryIntent.RAG_FACTUAL,
+                "query": "",
+                "results": [],
+            }
+
         intent = self._classifier.classify(query)
+
+        # -------------------------------------------------------------
+        # GREETING
+        # -------------------------------------------------------------
 
         if intent == QueryIntent.GREETING:
             return {
                 "intent": intent,
-                "response": (
+                "query": query,
+                "results": [],
+                "direct_response": (
                     "Hello! 👋 Upload one or more documents "
                     "and ask me anything related to them."
                 ),
             }
 
+        # -------------------------------------------------------------
+        # OUT OF SCOPE
+        # -------------------------------------------------------------
+
         if intent == QueryIntent.OUT_OF_SCOPE:
             return {
                 "intent": intent,
-                "response": (
-                    "I can answer questions only from uploaded "
-                    "documents."
+                "query": query,
+                "results": [],
+                "direct_response": (
+                    "I can answer questions using the uploaded documents. "
+                    "Please ask something related to their content."
                 ),
             }
 
         enhanced_query = self._enhancer.enhance(query)
 
-        # ---------------------------------------------------------
-        # Extract explicit page reference.
-        #
-        # Examples:
-        #
-        #   "show me table on page 24"
-        #   "show the image from page 37"
-        #   "figure on page 10"
-        #
-        # If no explicit page is present, page_number remains None
-        # and normal semantic retrieval is used.
-        # ---------------------------------------------------------
+        page_number = self._extract_page_number(query)
+        table_number = self._extract_table_number(query)
 
-        page_number = self._extract_page_number(
-            query
-        )
-
-        # ---------------------------------------------------------
-        # IMAGE SEARCH
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # IMAGE
+        # -------------------------------------------------------------
 
         if intent == QueryIntent.SEARCH_IMAGE:
-            results = self._image_service.get_images(
-                query=enhanced_query,
+
+            results = self._search_images(
+                query=query,
                 project_name=project_name,
                 document_name=document_name,
-                limit=5,
                 page_number=page_number,
             )
 
             return {
                 "intent": intent,
+                "query": query,
                 "results": results,
+                "page_number": page_number,
             }
 
-        # ---------------------------------------------------------
-        # TABLE SEARCH
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # TABLE
+        # -------------------------------------------------------------
 
         if intent == QueryIntent.SEARCH_TABLE:
-            results = self._table_service.get_tables(
-                query=enhanced_query,
+
+            results = self._search_tables(
+                query=query,
                 project_name=project_name,
                 document_name=document_name,
-                limit=5,
                 page_number=page_number,
+                table_number=table_number,
             )
 
             return {
                 "intent": intent,
+                "query": query,
                 "results": results,
+                "page_number": page_number,
+                "table_number": table_number,
             }
 
-        # ---------------------------------------------------------
-        # NORMAL DOCUMENT SEARCH
-        # ---------------------------------------------------------
+        # -------------------------------------------------------------
+        # SUMMARY / PROJECT SUMMARY / AMBIGUOUS SUMMARY
+        # -------------------------------------------------------------
 
         if intent in {
-            QueryIntent.RAG_FACTUAL,
-            QueryIntent.RAG_SYNTHESIS,
-            QueryIntent.RAG_SEARCH,
+            QueryIntent.DOCUMENT_SUMMARY,
+            QueryIntent.PROJECT_SUMMARY,
+            QueryIntent.AMBIGUOUS_DOCUMENT,
         }:
-            results = self._rag.search(
-                query=enhanced_query,
-                limit=5,
+
+            results = self._retrieve_summary_evidence(
+                query=query,
                 project_name=project_name,
                 document_name=document_name,
             )
 
             return {
                 "intent": intent,
+                "query": query,
                 "results": results,
             }
+
+        # -------------------------------------------------------------
+        # NORMAL RAG
+        # -------------------------------------------------------------
+
+        results = self._search_rag(
+            query=enhanced_query,
+            project_name=project_name,
+            document_name=document_name,
+            page_number=page_number,
+        )
 
         return {
             "intent": intent,
-            "query": enhanced_query,
+            "query": query,
+            "results": results,
+            "page_number": page_number,
         }
+
+    # =================================================================
+    # RAG SEARCH
+    # =================================================================
+
+    def _search_rag(
+        self,
+        query: str,
+        project_name: str | None,
+        document_name: str | None,
+        page_number: int | None = None,
+        limit: int = 8,
+    ) -> list[Any]:
+
+        return self._rag.search(
+            query=query,
+            limit=limit,
+            project_name=project_name,
+            document_name=document_name,
+            page_number=page_number,
+        )
+
+    # =================================================================
+    # IMAGE SEARCH
+    # =================================================================
+
+    def _search_images(
+        self,
+        query: str,
+        project_name: str | None,
+        document_name: str | None,
+        page_number: int | None,
+    ) -> list[Any]:
+
+        """
+        Use the actual ImageService API.
+
+        ImageService exposes:
+            get_images(...)
+        """
+
+        return self._image_service.get_images(
+            query=query,
+            project_name=project_name,
+            document_name=document_name,
+            page_number=page_number,
+        )
+
+    # =================================================================
+    # TABLE SEARCH
+    # =================================================================
+
+    def _search_tables(
+        self,
+        query: str,
+        project_name: str | None,
+        document_name: str | None,
+        page_number: int | None,
+        table_number: int | None,
+    ) -> list[Any]:
+
+        """
+        Use the actual TableService API.
+
+        TableService exposes:
+            get_tables(...)
+        """
+
+        return self._table_service.get_tables(
+            query=query,
+            project_name=project_name,
+            document_name=document_name,
+            page_number=page_number,
+            table_number=table_number,
+        )
+
+    # =================================================================
+    # SUMMARY RETRIEVAL
+    # =================================================================
+
+    def _retrieve_summary_evidence(
+        self,
+        query: str,
+        project_name: str | None,
+        document_name: str | None,
+    ) -> list[Any]:
+
+        """
+        Retrieve broader evidence for summaries.
+
+        Gemini will later synthesize ONLY from these retrieved chunks.
+        """
+
+        summary_query = (
+            f"{query} "
+            "main topics sections key points overview"
+        )
+
+        return self._search_rag(
+            query=summary_query,
+            project_name=project_name,
+            document_name=document_name,
+            page_number=None,
+            limit=12,
+        )
+
+    # =================================================================
+    # PAGE NUMBER
+    # =================================================================
 
     @staticmethod
     def _extract_page_number(
         query: str,
     ) -> int | None:
-        """
-        Extract an explicit page number from a natural-language query.
 
-        Supported examples:
+        patterns = [
+            r"\bpage\s*(?:number|no\.?)?\s*[:#-]?\s*(\d+)\b",
+            r"\bp\.?\s*(\d+)\b",
+        ]
 
-            page 24
-            Page 24
-            on page 24
-            from page 24
-            pages 24
+        for pattern in patterns:
+            match = re.search(
+                pattern,
+                query,
+                flags=re.IGNORECASE,
+            )
 
-        Returns None when the user did not explicitly specify
-        a page.
-        """
+            if match:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    return None
+
+        return None
+
+    # =================================================================
+    # TABLE NUMBER
+    # =================================================================
+
+    @staticmethod
+    def _extract_table_number(
+        query: str,
+    ) -> int | None:
+
+        pattern = (
+            r"\btable\s*(?:number|no\.?)?"
+            r"\s*[:#-]?\s*(\d+)\b"
+        )
 
         match = re.search(
-            r"\bpages?\s+(\d+)\b",
+            pattern,
             query,
             flags=re.IGNORECASE,
         )
@@ -168,13 +336,6 @@ class ChatAgent(BaseAgent):
             return None
 
         try:
-            page_number = int(
-                match.group(1)
-            )
+            return int(match.group(1))
         except ValueError:
             return None
-
-        if page_number <= 0:
-            return None
-
-        return page_number

@@ -1,9 +1,6 @@
 from pydantic import BaseModel, Field
 
 
-from pydantic import BaseModel, Field
-
-
 class ChunkMetadata(BaseModel):
     project_id: str
     project_name: str
@@ -19,7 +16,8 @@ class ChunkMetadata(BaseModel):
     section: str | None = None
 
     chunk_type: str = "text"
-    
+
+    # Generic structured-content metadata
     table_id: str | None = None
     table_number: str | None = None
     table_caption: str | None = None
@@ -28,6 +26,8 @@ class ChunkMetadata(BaseModel):
 
     image_id: str | None = None
     image_path: str | None = None
+    image_number: str | None = None
+    image_caption: str | None = None
 
     source: str = "upload"
 
@@ -38,9 +38,6 @@ class DocumentChunk(BaseModel):
     """
 
     id: str
-
     text: str
-
     metadata: ChunkMetadata
-
     embedding: list[float] | None = None

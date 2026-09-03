@@ -1,27 +1,23 @@
+from __future__ import annotations
+
+
 class QueryEnhancer:
+    """
+    Lightweight query normalizer.
 
-    def enhance(
-        self,
-        query: str,
-    ) -> str:
+    The user's original wording is preserved because the retrieval
+    system should search for what the user actually asked.
 
-        query = query.strip()
+    Metadata such as project, document, page number, and chunk type
+    should be handled by the retrieval layer rather than by rewriting
+    the query text.
+    """
 
-        enhanced = query
+    @staticmethod
+    def enhance(query: str) -> str:
+        if not query:
+            return ""
 
-        replacements = {
-            "pdf": "uploaded pdf document",
-            "doc": "uploaded document",
-            "table": "table inside uploaded documents",
-            "image": "image inside uploaded documents",
-            "summary": "summary of uploaded document",
-        }
-
-        for old, new in replacements.items():
-
-            enhanced = enhanced.replace(
-                old,
-                new,
-            )
-
-        return enhanced
+        # Preserve the user's actual query.
+        # Only normalize surrounding/repeated whitespace.
+        return " ".join(query.strip().split())

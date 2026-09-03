@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Document Intelligence</title>
+
+    <link rel="stylesheet" href="style.css">
+
+    <!-- Markdown renderer -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+
+<body>
+
+<div class="app">
+
+    <!-- ================= SIDEBAR ================= -->
+
+    <aside class="sidebar">
+
+        <div class="brand">
+            <div class="brand-icon">AI</div>
+
+            <div>
+                <h1>Document AI</h1>
+                <span>Intelligent Document Assistant</span>
+            </div>
+        </div>
+
+        <!-- Project -->
+
+        <section class="sidebar-section">
+
+            <label for="projectSelect">Project</label>
+
+            <select id="projectSelect">
+                <option value="">Select project</option>
+            </select>
+
+        </section>
+
+        <!-- Documents -->
+
+        <section class="sidebar-section documents-section">
+
+            <div class="section-header">
+
+                <label>Documents</label>
+
+                <button
+                    id="refreshDocumentsBtn"
+                    class="icon-button"
+                    title="Refresh documents"
+                >
+                    ↻
+                </button>
+
+            </div>
+
+            <div id="documentList" class="document-list">
+
+                <div class="empty-state">
+                    Select a project
+                </div>
+
+            </div>
+
+        </section>
+
+        <!-- Upload -->
+
+        <section class="sidebar-section">
+
+            <label>Upload document</label>
+
+            <div
+                id="uploadArea"
+                class="upload-area"
+            >
+
+                <input
+                    type="file"
+                    id="fileInput"
+                    accept=".pdf,.docx,.pptx,.xlsx"
+                    hidden
+                >
+
+                <div class="upload-icon">
+                    ↑
+                </div>
+
+                <p>Click to upload</p>
+
+                <span>
+                    PDF, DOCX, PPTX or XLSX
+                </span>
+
+            </div>
+
+            <div
+                id="uploadStatus"
+                class="upload-status hidden"
+            ></div>
+
+        </section>
+
+    </aside>
+
+
+    <!-- ================= MAIN ================= -->
+
+    <main class="main">
+
+        <!-- Header -->
+
+        <header class="topbar">
+
+            <div>
+
+                <h2 id="currentDocumentTitle">
+                    Document Assistant
+                </h2>
+
+                <p id="currentDocumentSubtitle">
+                    Select a project and document to begin
+                </p>
+
+            </div>
+
+            <div class="connection-status">
+
+                <span class="status-dot"></span>
+
+                <span>API Connected</span>
+
+            </div>
+
+        </header>
+
+
+        <!-- Chat -->
+
+        <section
+            id="chatContainer"
+            class="chat-container"
+        >
+
+            <!-- Welcome -->
+
+            <div
+                id="welcomeMessage"
+                class="welcome"
+            >
+
+                <div class="welcome-icon">
+                    ✦
+                </div>
+
+                <h2>
+                    Ask anything about your document
+                </h2>
+
+                <p>
+                    Search through text, tables, figures and images
+                    using natural language.
+                </p>
+
+                <div class="example-prompts">
+
+                    <button
+                        class="prompt-button"
+                        data-prompt="Summarize this document"
+                    >
+                        Summarize this document
+                    </button>
+
+                    <button
+                        class="prompt-button"
+                        data-prompt="Show me the important tables in this document"
+                    >
+                        Show important tables
+                    </button>
+
+                    <button
+                        class="prompt-button"
+                        data-prompt="Show me the figures in this document"
+                    >
+                        Show figures
+                    </button>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- Input -->
+
+        <footer class="chat-input-area">
+
+            <div class="chat-input-wrapper">
+
+                <textarea
+                    id="chatInput"
+                    placeholder="Ask a question about your document..."
+                    rows="1"
+                ></textarea>
+
+                <button
+                    id="sendButton"
+                    class="send-button"
+                    title="Send"
+                >
+                    ↑
+                </button>
+
+            </div>
+
+            <div class="input-hint">
+
+                <span>
+                    Answers are based only on the selected document.
+                </span>
+
+                <span>
+                    Enter to send · Shift + Enter for new line
+                </span>
+
+            </div>
+
+        </footer>
+
+    </main>
+
+</div>
+
+
+<!-- ================= DELETE MODAL ================= -->
+
+<div
+    id="deleteModal"
+    class="modal hidden"
+>
+
+    <div class="modal-card">
+
+        <h3>Delete document?</h3>
+
+        <p id="deleteModalText">
+            This action cannot be undone.
+        </p>
+
+        <div class="modal-actions">
+
+            <button
+                id="cancelDeleteButton"
+                class="secondary-button"
+            >
+                Cancel
+            </button>
+
+            <button
+                id="confirmDeleteButton"
+                class="danger-button"
+            >
+                Delete
+            </button>
+
+        </div>
+
+    </div>
+
+</div>
+
+
+<!-- ================= TOAST ================= -->
+
+<div
+    id="toast"
+    class="toast hidden"
+></div>
+
+
+<script src="./app.js"></script>
+
+</body>
+</html>

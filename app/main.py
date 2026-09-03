@@ -6,11 +6,24 @@ from app.api.image import router as image_router
 from app.api.project import router as project_router
 from app.api.upload import router as upload_router
 
+from fastapi.middleware.cors import CORSMiddleware
+
 
 app = FastAPI(
     title="Chat Platform",
     description="Enterprise Document Intelligence Platform",
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 

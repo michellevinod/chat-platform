@@ -6,9 +6,7 @@ from app.chunking.chunk_models import (
     ChunkMetadata,
     DocumentChunk,
 )
-from app.ingestion.extractors.raw_models import (
-    RawDocument,
-)
+from app.ingestion.extractors.raw_models import RawDocument
 from app.models.enums import BlockType
 
 
@@ -17,7 +15,8 @@ class ChunkGenerator:
     Generates semantic chunks from a normalized document.
 
     The generator is format-agnostic. PDF, DOCX, PPTX, and XLSX
-    extractors produce normalized RawDocument objects.
+    extractors produce RawDocument objects which are converted into
+    DocumentChunk objects here.
 
     Project and document metadata are read dynamically from
     RawDocument.metadata.
@@ -28,9 +27,9 @@ class ChunkGenerator:
         document: RawDocument,
     ) -> list[DocumentChunk]:
         """
-        Convert normalized document blocks into DocumentChunk objects.
+        Convert document blocks into DocumentChunk objects.
 
-        The document metadata is expected to contain:
+        Required document metadata:
 
             project_id
             project_name
@@ -38,6 +37,10 @@ class ChunkGenerator:
             document_name
             document_type
             source
+
+        Structured-content metadata such as table numbers,
+        captions, image numbers, and image captions are preserved
+        whenever supplied by the extractor.
         """
 
         chunks: list[DocumentChunk] = []
@@ -52,9 +55,15 @@ class ChunkGenerator:
             document.file_name,
         )
         document_type = metadata.get("document_type")
-        source = metadata.get("source", "upload")
+        source = metadata.get(
+            "source",
+            "upload",
+        )
 
-        # Required metadata must come from the ingestion pipeline.
+        # ---------------------------------------------------------------
+        # Validate required metadata
+        # ---------------------------------------------------------------
+
         if not project_id:
             raise ValueError(
                 "Missing required document metadata: project_id"
@@ -77,19 +86,35 @@ class ChunkGenerator:
 
         chunk_number = 0
 
+        # ---------------------------------------------------------------
+        # Process every page and block
+        # ---------------------------------------------------------------
+
         for page in document.pages:
             for block in page.blocks:
 
-                # =========================================================
+                block_metadata = (
+                    getattr(
+                        block,
+                        "metadata",
+                        None,
+                    )
+                    or {}
+                )
+
+                # =======================================================
                 # TEXT
-                # =========================================================
+                # =======================================================
 
                 if block.block_type == BlockType.TEXT:
 
-                    text = getattr(
-                        block,
-                        "text",
-                        "",
+                    text = (
+                        getattr(
+                            block,
+                            "text",
+                            "",
+                        )
+                        or ""
                     ).strip()
 
                     if not text:
@@ -125,9 +150,9 @@ class ChunkGenerator:
 
                     chunk_number += 1
 
-                # =========================================================
+                # =======================================================
                 # TABLE
-                # =========================================================
+                # =======================================================
 
                 elif block.block_type == BlockType.TABLE:
 
@@ -135,23 +160,26 @@ class ChunkGenerator:
                         block,
                         "headers",
                         [],
-                    )
+                    ) or []
 
                     rows = getattr(
                         block,
                         "rows",
                         [],
-                    )
+                    ) or []
 
-                    markdown = getattr(
-                        block,
-                        "markdown",
-                        "",
+                    markdown = (
+                        getattr(
+                            block,
+                            "markdown",
+                            "",
+                        )
+                        or ""
                     ).strip()
 
-                    # -----------------------------------------------------
+                    # ---------------------------------------------------
                     # Normalize headers
-                    # -----------------------------------------------------
+                    # ---------------------------------------------------
 
                     normalized_headers = [
                         str(header).strip()
@@ -160,10 +188,9 @@ class ChunkGenerator:
                         for header in headers
                     ]
 
-                    # -----------------------------------------------------
-                    # Normalize rows while preserving
-                    # the original row/column structure.
-                    # -----------------------------------------------------
+                    # ---------------------------------------------------
+                    # Normalize rows while preserving structure
+                    # ---------------------------------------------------
 
                     normalized_rows: list[list[str]] = []
 
@@ -181,6 +208,7 @@ class ChunkGenerator:
                         )
 
                     # Ignore completely empty tables.
+
                     if (
                         not normalized_headers
                         and not normalized_rows
@@ -188,9 +216,9 @@ class ChunkGenerator:
                     ):
                         continue
 
-                    # -----------------------------------------------------
+                    # ---------------------------------------------------
                     # Stable table identifier
-                    # -----------------------------------------------------
+                    # ---------------------------------------------------
 
                     table_id = (
                         f"table_"
@@ -199,12 +227,20 @@ class ChunkGenerator:
                         f"{block.block_number}"
                     )
 
-                    # -----------------------------------------------------
-                    # Extract table caption
-                    #
-                    # Example:
-                    # "Table 1 - Harvey 1 Well Data"
-                    # -----------------------------------------------------
+                    # ---------------------------------------------------
+                    # Table metadata
+                    # ---------------------------------------------------
+
+                    table_number = (
+                        block_metadata.get(
+                            "table_number"
+                        )
+                        or getattr(
+                            block,
+                            "table_number",
+                            None,
+                        )
+                    )
 
                     table_caption = (
                         getattr(
@@ -212,16 +248,28 @@ class ChunkGenerator:
                             "caption",
                             None,
                         )
-                        or ""
-                    ).strip()
+                        or block_metadata.get(
+                            "table_caption"
+                        )
+                        or None
+                    )
 
-                    # -----------------------------------------------------
+                    if table_caption:
+                        table_caption = str(
+                            table_caption
+                        ).strip()
+
+                    if table_number is not None:
+                        table_number = str(
+                            table_number
+                        ).strip()
+
+                    # ---------------------------------------------------
                     # Build searchable table text
                     #
-                    # IMPORTANT:
-                    # The caption is deliberately included here because
-                    # this text is later used for embedding/vector search.
-                    # -----------------------------------------------------
+                    # The structured table itself is preserved separately
+                    # in ChunkMetadata.
+                    # ---------------------------------------------------
 
                     table_text = self._build_table_text(
                         headers=normalized_headers,
@@ -231,13 +279,21 @@ class ChunkGenerator:
 
                     if table_caption:
                         table_text = (
-                            f"Table caption: {table_caption}\n"
+                            f"Table caption: "
+                            f"{table_caption}\n"
                             f"{table_text}"
                         )
 
-                    # -----------------------------------------------------
+                    if table_number:
+                        table_text = (
+                            f"Table number: "
+                            f"{table_number}\n"
+                            f"{table_text}"
+                        )
+
+                    # ---------------------------------------------------
                     # Create table chunk
-                    # -----------------------------------------------------
+                    # ---------------------------------------------------
 
                     chunks.append(
                         DocumentChunk(
@@ -252,8 +308,6 @@ class ChunkGenerator:
                                 page_number=page.page_number,
                                 chunk_number=chunk_number,
 
-                                # Preserve the table caption in the
-                                # existing heading field.
                                 heading=(
                                     table_caption
                                     or getattr(
@@ -273,6 +327,10 @@ class ChunkGenerator:
 
                                 table_id=table_id,
 
+                                table_number=table_number,
+
+                                table_caption=table_caption,
+
                                 table_headers=normalized_headers,
 
                                 table_rows=normalized_rows,
@@ -284,17 +342,20 @@ class ChunkGenerator:
 
                     chunk_number += 1
 
-                # =========================================================
+                # =======================================================
                 # IMAGE
-                # =========================================================
+                # =======================================================
 
                 elif block.block_type == BlockType.IMAGE:
 
-                    image_name = getattr(
-                        block,
-                        "image_name",
-                        "",
-                    )
+                    image_name = (
+                        getattr(
+                            block,
+                            "image_name",
+                            "",
+                        )
+                        or ""
+                    ).strip()
 
                     image_path = getattr(
                         block,
@@ -302,37 +363,103 @@ class ChunkGenerator:
                         None,
                     )
 
-                    # IMPORTANT:
-                    #
-                    # RawImageBlock provides image_name.
-                    # Use that filename as the stable image identifier.
-                    #
-                    # Previously this code tried:
-                    #
-                    #     getattr(block, "image_id", None)
-                    #
-                    # which resulted in image_id=None in Qdrant.
+                    # ---------------------------------------------------
+                    # Preserve a stable internal image identifier.
+                    # ---------------------------------------------------
 
-                    image_id = image_name or None
+                    image_id = (
+                        image_name
+                        or None
+                    )
 
-                    caption = (
+                    # ---------------------------------------------------
+                    # Image/figure metadata
+                    #
+                    # Extractors may provide figure_number or
+                    # image_number depending on the source format.
+                    # ---------------------------------------------------
+
+                    image_number = (
+                        block_metadata.get(
+                            "figure_number"
+                        )
+                        or block_metadata.get(
+                            "image_number"
+                        )
+                        or getattr(
+                            block,
+                            "figure_number",
+                            None,
+                        )
+                        or getattr(
+                            block,
+                            "image_number",
+                            None,
+                        )
+                    )
+
+                    image_caption = (
                         getattr(
                             block,
                             "caption",
                             None,
                         )
-                        or image_name
-                        or "Document image"
+                        or block_metadata.get(
+                            "figure_caption"
+                        )
+                        or block_metadata.get(
+                            "image_caption"
+                        )
+                        or None
                     )
 
-                    image_text = (
-                        f"Image / Figure: {caption} "
-                        f"on page {page.page_number}."
+                    if image_number is not None:
+                        image_number = str(
+                            image_number
+                        ).strip()
+
+                    if image_caption:
+                        image_caption = str(
+                            image_caption
+                        ).strip()
+
+                    # ---------------------------------------------------
+                    # Build searchable image text.
+                    #
+                    # Do not use the internal image filename as semantic
+                    # content when no real caption exists.
+                    # ---------------------------------------------------
+
+                    image_text_parts: list[str] = [
+                        "Image"
+                    ]
+
+                    if image_number:
+                        image_text_parts.append(
+                            str(image_number)
+                        )
+
+                    if image_caption:
+                        image_text_parts.append(
+                            f": {image_caption}"
+                        )
+
+                    image_text_parts.append(
+                        f"on page {page.page_number}"
+                    )
+
+                    image_text = " ".join(
+                        image_text_parts
                     )
 
                     # An image needs at least a path or identifier.
+
                     if not image_path and not image_id:
                         continue
+
+                    # ---------------------------------------------------
+                    # Create image chunk
+                    # ---------------------------------------------------
 
                     chunks.append(
                         DocumentChunk(
@@ -346,19 +473,29 @@ class ChunkGenerator:
                                 document_type=document_type,
                                 page_number=page.page_number,
                                 chunk_number=chunk_number,
-                                heading=caption,
+
+                                heading=image_caption,
+
                                 section=getattr(
                                     block,
                                     "section",
                                     None,
                                 ),
+
                                 chunk_type="image",
+
                                 image_id=image_id,
+
                                 image_path=(
                                     str(image_path)
                                     if image_path
                                     else None
                                 ),
+
+                                image_number=image_number,
+
+                                image_caption=image_caption,
+
                                 source=source,
                             ),
                         )
@@ -367,6 +504,10 @@ class ChunkGenerator:
                     chunk_number += 1
 
         return chunks
+
+    # ================================================================
+    # TABLE SEARCH TEXT
+    # ================================================================
 
     @staticmethod
     def _build_table_text(
@@ -377,15 +518,15 @@ class ChunkGenerator:
         """
         Build a searchable textual representation of a table.
 
-        This text is used for embedding/vector search only.
+        This representation is used for embedding/vector search only.
 
-        The original structured table is separately preserved in:
+        The original structured table remains separately available in:
 
             metadata.table_headers
             metadata.table_rows
 
-        Therefore the table does not need to be reconstructed
-        from this text representation when returned to the user.
+        Therefore, the table does not need to be reconstructed from
+        the embedding text when returned to the user.
         """
 
         parts: list[str] = []

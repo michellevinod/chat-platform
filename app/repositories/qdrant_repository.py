@@ -120,14 +120,16 @@ class QdrantRepository:
 
                 # Table metadata
                 "table_id": meta.table_id,
+                "table_number": meta.table_number,
+                "table_caption": meta.table_caption,
                 "table_headers": meta.table_headers,
                 "table_rows": meta.table_rows,
-                "caption": getattr(meta, "caption", None),
-                "table_number": getattr(meta, "table_number", None),
 
                 # Image metadata
                 "image_id": meta.image_id,
                 "image_path": meta.image_path,
+                "image_number": meta.image_number,
+                "image_caption": meta.image_caption,
 
                 "source": meta.source,
 
@@ -621,6 +623,7 @@ class QdrantRepository:
                 payload.get("table_id") or ""
             )
 
+
             table_number_value = str(
                 payload.get("table_number") or ""
             )
@@ -837,6 +840,14 @@ class QdrantRepository:
                         "table_id"
                     ),
 
+                    table_number=payload.get(
+                        "table_number"
+                    ),
+
+                    table_caption=payload.get(
+                        "table_caption"
+                    ),
+
                     table_headers=payload.get(
                         "table_headers",
                         [],
@@ -853,6 +864,14 @@ class QdrantRepository:
 
                     image_path=payload.get(
                         "image_path"
+                    ),
+
+                    image_number=payload.get(
+                        "image_number"
+                    ),
+
+                    image_caption=payload.get(
+                        "image_caption"
                     ),
 
                     source=payload.get(

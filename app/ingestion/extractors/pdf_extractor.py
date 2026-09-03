@@ -26,7 +26,7 @@ class PDFExtractor(BaseExtractor):
     """
     Extracts text, tables, images, and captions from PDF documents.
 
-    Image extraction is format-independent and uses PyMuPDF.
+    Image extraction is performed using PyMuPDF.
 
     Figure captions are detected from nearby text blocks and attached
     to the corresponding image whenever possible.
@@ -53,15 +53,6 @@ class PDFExtractor(BaseExtractor):
 
     # ---------------------------------------------------------------
     # TABLE CAPTION PATTERN
-    #
-    # Supports examples such as:
-    #
-    # Table 1. Harvey 1 well data record
-    # Table 1 - Harvey 1 well data record
-    # Table 1 — Harvey 1 well data record
-    # Table 1: Harvey 1 well data record
-    # TABLE 1. ...
-    # Table 1 Harvey 1 well data record
     # ---------------------------------------------------------------
 
     TABLE_PATTERN = re.compile(
@@ -193,7 +184,7 @@ class PDFExtractor(BaseExtractor):
                         )
 
                         # ------------------------------------------------
-                        # Find the REAL table caption from nearby text.
+                        # Find the real table caption from nearby text.
                         # ------------------------------------------------
 
                         table_caption_info = (
@@ -216,8 +207,6 @@ class PDFExtractor(BaseExtractor):
                                 ]
                             )
                         else:
-                            # Safe fallback when the PDF has no detectable
-                            # table caption.
                             table_number = str(
                                 tab_idx + 1
                             )
@@ -249,6 +238,13 @@ class PDFExtractor(BaseExtractor):
                                 ],
                                 headers=headers,
                                 caption=caption,
+
+                                # Preserve the table number so the
+                                # chunking layer can index it explicitly.
+                                metadata={
+                                    "table_number": table_number,
+                                    "table_caption": caption,
+                                },
                             )
                         )
 
@@ -306,15 +302,13 @@ class PDFExtractor(BaseExtractor):
         2. Caption immediately below the table.
         3. Nearest horizontally aligned table caption.
 
-        Only text that matches the TABLE_PATTERN is considered.
+        Only text that matches TABLE_PATTERN is considered.
         """
 
         if not text_blocks:
             return None
 
-        table_x0, table_y0, table_x1, table_y1 = (
-            table_bbox
-        )
+        table_x0, table_y0, table_x1, table_y1 = table_bbox
 
         candidates = []
 
@@ -333,9 +327,7 @@ class PDFExtractor(BaseExtractor):
 
             # --------------------------------------------------------
             # A PDF text block can contain multiple lines.
-            # Check each line independently so a page heading or
-            # paragraph containing the word "table" does not get
-            # mistaken for a caption.
+            # Check each line independently.
             # --------------------------------------------------------
 
             lines = [
@@ -354,8 +346,7 @@ class PDFExtractor(BaseExtractor):
                 table_title = match.group(2).strip()
 
                 # ----------------------------------------------------
-                # If the caption wraps onto the next line, include
-                # nearby continuation text when it is short enough.
+                # Handle wrapped captions.
                 # ----------------------------------------------------
 
                 caption_parts = [
@@ -367,7 +358,6 @@ class PDFExtractor(BaseExtractor):
                         line_index + 1
                     ]
 
-                    # Avoid swallowing another caption or heading.
                     if (
                         not self.TABLE_PATTERN.match(
                             next_line
@@ -377,8 +367,6 @@ class PDFExtractor(BaseExtractor):
                         )
                         and len(next_line) <= 200
                     ):
-                        # Only append if the first line looks like a
-                        # caption rather than a very long paragraph.
                         if len(table_title) < 180:
                             caption_parts.append(
                                 next_line
@@ -439,9 +427,6 @@ class PDFExtractor(BaseExtractor):
 
                 # ----------------------------------------------------
                 # Vertical relationship.
-                #
-                # Positive values mean the caption is separated from
-                # the table vertically.
                 # ----------------------------------------------------
 
                 if block_y1 <= table_y0:
@@ -459,8 +444,6 @@ class PDFExtractor(BaseExtractor):
                     position = "below"
 
                 else:
-                    # Caption overlaps table vertically. This can
-                    # happen in unusual PDF layouts.
                     vertical_gap = 0.0
                     position = "overlap"
 
@@ -471,7 +454,6 @@ class PDFExtractor(BaseExtractor):
                 if vertical_gap > 300:
                     continue
 
-                # Prefer horizontally aligned captions.
                 candidates.append(
                     {
                         "caption": caption,
@@ -491,12 +473,6 @@ class PDFExtractor(BaseExtractor):
         # 1. Caption above the table
         # 2. Horizontal alignment
         # 3. Short vertical distance
-        #
-        # This handles the common PDF layout where:
-        #
-        # Table 1. Caption
-        #
-        # [TABLE]
         # ------------------------------------------------------------
 
         candidates.sort(
@@ -528,9 +504,12 @@ class PDFExtractor(BaseExtractor):
         Extract images from a page and associate nearby figure
         captions with them.
 
-        The association is based on image position and nearby
-        caption text rather than assuming that the first image
-        on a page is a particular figure.
+        Figure metadata is preserved separately from the generated
+        storage filename.
+
+        This is important because the generated filename is an internal
+        implementation detail and should not be used for semantic
+        retrieval.
         """
 
         image_blocks: list[RawImageBlock] = []
@@ -607,16 +586,40 @@ class PDFExtractor(BaseExtractor):
                 )
             )
 
-            caption = self._find_image_caption(
+            # --------------------------------------------------------
+            # Find semantic figure metadata.
+            #
+            # Returns:
+            # {
+            #     "caption": "...",
+            #     "figure_number": "10",
+            # }
+            # --------------------------------------------------------
+
+            caption_info = self._find_image_caption(
                 image_bbox=bbox,
                 text_blocks=text_blocks,
             )
 
-            if not caption:
-                caption = (
-                    f"Figure on "
-                    f"Page {page_number}"
+            figure_number = None
+            figure_caption = None
+
+            if caption_info:
+                figure_number = caption_info.get(
+                    "figure_number"
                 )
+
+                figure_caption = caption_info.get(
+                    "caption"
+                )
+
+            # --------------------------------------------------------
+            # Do NOT create a fake semantic caption such as
+            # "Figure on Page 17".
+            #
+            # The page number is already stored separately in metadata.
+            # A synthetic caption can interfere with semantic retrieval.
+            # --------------------------------------------------------
 
             image_blocks.append(
                 RawImageBlock(
@@ -629,11 +632,22 @@ class PDFExtractor(BaseExtractor):
                     bbox=bbox,
                     image_name=image_filename,
                     image_path=image_path,
-                    caption=caption,
+                    caption=figure_caption,
                     alt_text=(
-                        f"Extracted image "
-                        f"{image_filename}"
+                        figure_caption
+                        or "Extracted document image"
                     ),
+
+                    # Preserve semantic figure metadata.
+                    #
+                    # RawImageBlock supports arbitrary metadata through
+                    # the RawBlock base model.
+                    metadata={
+                        "figure_number": figure_number,
+                        "figure_caption": figure_caption,
+                        "image_number": figure_number,
+                        "image_caption": figure_caption,
+                    },
                 )
             )
 
@@ -647,9 +661,16 @@ class PDFExtractor(BaseExtractor):
         self,
         image_bbox: tuple,
         text_blocks: list[RawTextBlock],
-    ) -> str | None:
+    ) -> dict | None:
         """
         Find the most likely figure caption associated with an image.
+
+        Returns a dictionary containing:
+
+            {
+                "caption": "Figure 10: Example caption",
+                "figure_number": "10",
+            }
 
         Preference:
 
@@ -682,109 +703,220 @@ class PDFExtractor(BaseExtractor):
             if not text:
                 continue
 
-            match = self.FIGURE_PATTERN.match(
-                text
-            )
+            # --------------------------------------------------------
+            # PDF text blocks may contain multiple lines.
+            #
+            # Captions can also wrap over multiple lines, so inspect
+            # each line individually instead of matching the entire
+            # text block as one string.
+            # --------------------------------------------------------
 
-            if not match:
-                continue
+            lines = [
+                line.strip()
+                for line in text.splitlines()
+                if line.strip()
+            ]
 
-            figure_number = match.group(1)
-            figure_title = match.group(2).strip()
-
-            caption = (
-                f"Figure {figure_number}: "
-                f"{figure_title}"
-            )
-
-            block_bbox = getattr(
-                text_block,
-                "bbox",
-                (
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                ),
-            )
-
-            block_x0, block_y0, block_x1, block_y1 = (
-                block_bbox
-            )
-
-            # Horizontal overlap helps prevent selecting a
-            # caption belonging to another figure beside it.
-            horizontal_overlap = max(
-                0.0,
-                min(
-                    image_x1,
-                    block_x1,
+            for line_index, line in enumerate(lines):
+                match = self.FIGURE_PATTERN.match(
+                    line
                 )
-                - max(
-                    image_x0,
+
+                if not match:
+                    continue
+
+                figure_number = match.group(1)
+                figure_title = match.group(2).strip()
+
+                # ----------------------------------------------------
+                # Handle wrapped captions.
+                #
+                # Example:
+                #
+                # Figure 10: Some long caption
+                # continued caption text
+                #
+                # Only append a short continuation and never consume
+                # another figure/table caption.
+                # ----------------------------------------------------
+
+                caption_parts = [
+                    figure_title
+                ]
+
+                if line_index + 1 < len(lines):
+                    next_line = lines[
+                        line_index + 1
+                    ]
+
+                    if (
+                        not self.FIGURE_PATTERN.match(
+                            next_line
+                        )
+                        and not self.TABLE_PATTERN.match(
+                            next_line
+                        )
+                        and len(next_line) <= 200
+                    ):
+                        if len(figure_title) < 180:
+                            caption_parts.append(
+                                next_line
+                            )
+
+                figure_title = " ".join(
+                    caption_parts
+                ).strip()
+
+                caption = (
+                    f"Figure {figure_number}: "
+                    f"{figure_title}"
+                )
+
+                block_bbox = getattr(
+                    text_block,
+                    "bbox",
+                    (
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    ),
+                )
+
+                (
                     block_x0,
-                ),
-            )
+                    block_y0,
+                    block_x1,
+                    block_y1,
+                ) = block_bbox
 
-            image_width = max(
-                1.0,
-                image_x1 - image_x0,
-            )
+                # ----------------------------------------------------
+                # Horizontal overlap helps prevent selecting a
+                # caption belonging to another figure beside it.
+                # ----------------------------------------------------
 
-            overlap_ratio = (
-                horizontal_overlap
-                / image_width
-            )
+                horizontal_overlap = max(
+                    0.0,
+                    min(
+                        image_x1,
+                        block_x1,
+                    )
+                    - max(
+                        image_x0,
+                        block_x0,
+                    ),
+                )
 
-            vertical_gap = min(
-                abs(
-                    block_y1
-                    - image_y0
-                ),
-                abs(
-                    block_y0
-                    - image_y1
-                ),
-            )
+                image_width = max(
+                    1.0,
+                    image_x1 - image_x0,
+                )
 
-            # Prefer captions that are reasonably aligned
-            # horizontally with the image.
-            if overlap_ratio <= 0:
-                continue
+                overlap_ratio = (
+                    horizontal_overlap
+                    / image_width
+                )
 
-            candidates.append(
-                {
-                    "caption": caption,
-                    "figure_number": figure_number,
-                    "vertical_gap": vertical_gap,
-                    "overlap_ratio": overlap_ratio,
-                    "block_y0": block_y0,
-                    "block_y1": block_y1,
-                }
-            )
+                # ----------------------------------------------------
+                # Determine whether caption is above or below image.
+                # ----------------------------------------------------
+
+                if block_y1 <= image_y0:
+                    vertical_gap = (
+                        image_y0 - block_y1
+                    )
+
+                    position = "above"
+
+                elif block_y0 >= image_y1:
+                    vertical_gap = (
+                        block_y0 - image_y1
+                    )
+
+                    position = "below"
+
+                else:
+                    # Caption overlaps image vertically.
+                    vertical_gap = 0.0
+                    position = "overlap"
+
+                # ----------------------------------------------------
+                # Captions with no horizontal relationship to the
+                # image are unlikely to belong to it.
+                # ----------------------------------------------------
+
+                if overlap_ratio <= 0:
+                    continue
+
+                # ----------------------------------------------------
+                # Slightly prefer captions below the image because
+                # this is the most common PDF figure layout.
+                # ----------------------------------------------------
+
+                candidates.append(
+                    {
+                        "caption": caption,
+                        "figure_number": figure_number,
+                        "vertical_gap": vertical_gap,
+                        "overlap_ratio": overlap_ratio,
+                        "position": position,
+                        "block_y0": block_y0,
+                        "block_y1": block_y1,
+                    }
+                )
 
         if not candidates:
             return None
 
-        # Prefer horizontal alignment first, then distance.
-        candidates.sort(
-            key=lambda candidate: (
+        # ------------------------------------------------------------
+        # Ranking:
+        #
+        # 1. Captions below image
+        # 2. Captions above image
+        # 3. Horizontal alignment
+        # 4. Vertical distance
+        #
+        # This avoids choosing a nearby caption that belongs to a
+        # different figure.
+        # ------------------------------------------------------------
+
+        def candidate_rank(candidate: dict) -> tuple:
+            position_priority = {
+                "below": 0,
+                "above": 1,
+                "overlap": 2,
+            }
+
+            return (
+                position_priority.get(
+                    candidate["position"],
+                    3,
+                ),
                 -candidate["overlap_ratio"],
                 candidate["vertical_gap"],
             )
+
+        candidates.sort(
+            key=candidate_rank
         )
 
         best = candidates[0]
 
-        # Avoid associating a caption that is extremely far
-        # away from the image.
+        # ------------------------------------------------------------
+        # Avoid associating a caption that is extremely far away
+        # from the image.
         #
-        # The threshold is deliberately generous because PDF
-        # layouts vary significantly.
+        # The threshold is deliberately generous because PDF layouts
+        # vary significantly.
+        # ------------------------------------------------------------
+
         if best["vertical_gap"] > 250:
             return None
 
-        return best["caption"]
+        return {
+            "caption": best["caption"],
+            "figure_number": best["figure_number"],
+        }
 
     # ================================================================
     # TEXT EXTRACTION
