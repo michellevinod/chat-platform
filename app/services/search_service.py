@@ -54,3 +54,9 @@ class SearchService:
             chunk_type=chunk_type,
             page_number=page_number,
         )
+
+    def page_search(self, page_number: int, project_name: str | None = None, document_name: str | None = None):
+        return self._repository.find_page_chunks("documents", page_number, project_name, document_name)
+
+    def representative_document_search(self, document_name: str, project_name: str | None = None, limit: int = 16):
+        return self._repository.get_representative_document_chunks("documents", document_name, project_name, limit)

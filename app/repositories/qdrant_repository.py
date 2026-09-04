@@ -351,6 +351,7 @@ class QdrantRepository:
         document_name: str | None = None,
         page_number: int | None = None,
         image_id: str | None = None,
+        image_number: str | None = None,
         limit: int = 10,
     ) -> list[RetrievedChunk]:
         """
@@ -416,6 +417,17 @@ class QdrantRepository:
                 )
             )
 
+        if image_number is not None:
+
+            must_conditions.append(
+                FieldCondition(
+                    key="image_number",
+                    match=MatchValue(
+                        value=str(image_number),
+                    ),
+                )
+            )
+
         query_filter = Filter(
             must=must_conditions
         )
@@ -430,6 +442,53 @@ class QdrantRepository:
         return self._convert_results(
             points
         )
+
+    def find_page_chunks(
+        self,
+        collection_name: str,
+        page_number: int,
+        project_name: str | None = None,
+        document_name: str | None = None,
+        limit: int = 100,
+    ) -> list[RetrievedChunk]:
+        """Return all indexed evidence from one page in document order."""
+        must = [FieldCondition(key="page_number", match=MatchValue(value=page_number))]
+        if project_name:
+            must.append(FieldCondition(key="project_name", match=MatchValue(value=project_name)))
+        if document_name:
+            must.append(FieldCondition(key="document_name", match=MatchValue(value=document_name)))
+        points, _ = self._client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=must),
+            limit=limit,
+            with_payload=True,
+        )
+        return sorted(self._convert_results(points), key=lambda chunk: chunk.chunk_number)
+
+    def get_representative_document_chunks(
+        self,
+        collection_name: str,
+        document_name: str,
+        project_name: str | None = None,
+        limit: int = 16,
+        scan_limit: int = 1000,
+    ) -> list[RetrievedChunk]:
+        """Bounded, page-spread evidence for document-level summaries."""
+        must = [FieldCondition(key="document_name", match=MatchValue(value=document_name))]
+        if project_name:
+            must.append(FieldCondition(key="project_name", match=MatchValue(value=project_name)))
+        points, _ = self._client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=must),
+            limit=scan_limit,
+            with_payload=True,
+        )
+        chunks = sorted(self._convert_results(points), key=lambda chunk: (chunk.page_number, chunk.chunk_number))
+        text_chunks = [chunk for chunk in chunks if chunk.chunk_type in {"text", "ocr"} and chunk.text.strip()]
+        if len(text_chunks) <= limit:
+            return text_chunks
+        indices = {round(index * (len(text_chunks) - 1) / (limit - 1)) for index in range(limit)}
+        return [chunk for index, chunk in enumerate(text_chunks) if index in indices]
 
 
     def find_tables_by_query(
@@ -485,7 +544,7 @@ class QdrantRepository:
         requested_table_number = (
             table_match.group(1)
             if table_match
-            else None
+            else self._normalize_identifier(table_number)
         )
 
         # ------------------------------------------------------------
@@ -585,19 +644,6 @@ class QdrantRepository:
             and token not in stop_words
         }
 
-        # Terms that are particularly useful for identifying the requested
-        # table. Give these a larger weight than generic matching.
-        important_terms = {
-            "harvey",
-            "micp",
-            "summary",
-            "result",
-            "results",
-            "well",
-            "data",
-            "record",
-        }
-
         scored_points: list[tuple[int, object]] = []
 
         for point in points:
@@ -616,7 +662,7 @@ class QdrantRepository:
             )
 
             caption_value = str(
-                payload.get("caption") or ""
+                payload.get("table_caption") or ""
             )
 
             table_id_value = str(
@@ -627,6 +673,17 @@ class QdrantRepository:
             table_number_value = str(
                 payload.get("table_number") or ""
             )
+
+            # If a record has structured numbering, an explicit request must
+            # never be satisfied by a different numbered table. Legacy rows
+            # without this metadata remain eligible as a compatibility path.
+            normalized_table_number = self._normalize_identifier(table_number_value)
+            if (
+                requested_table_number
+                and table_number_value
+                and normalized_table_number != requested_table_number
+            ):
+                continue
 
             searchable_text = " ".join(
                 [
@@ -665,7 +722,7 @@ class QdrantRepository:
                     score += 100
 
                 if (
-                    table_number_value
+                    normalized_table_number
                     == requested_table_number
                 ):
                     score += 150
@@ -676,10 +733,7 @@ class QdrantRepository:
 
             for term in query_terms:
                 if term in searchable_text:
-                    if term in important_terms:
-                        score += 8
-                    else:
-                        score += 2
+                    score += 2
 
             # Exact phrase matching is a strong signal.
             normalized_query = re.sub(
@@ -694,17 +748,15 @@ class QdrantRepository:
                 searchable_text,
             )
 
-            # Useful phrases from common table queries.
-            for phrase in (
-                "harvey 1",
-                "well data record",
-                "summary result",
-                "micp tests",
-                "summary result of micp tests",
-            ):
-                if phrase in normalized_query:
-                    if phrase in normalized_text:
-                        score += 30
+            # Generic exact phrase signal for descriptive requests.
+            meaningful_terms = [
+                term for term in query_terms
+                if not term.isdigit()
+            ]
+            if len(meaningful_terms) >= 2:
+                phrase = " ".join(meaningful_terms)
+                if phrase in normalized_text:
+                    score += 20
 
             # --------------------------------------------------------
             # Page query is already an exact Qdrant filter, so every
@@ -745,6 +797,12 @@ class QdrantRepository:
         return self._convert_results(
             selected_points
         )
+
+    @staticmethod
+    def _normalize_identifier(value: object) -> str:
+        """Normalize plain and labelled numeric metadata (for legacy payloads)."""
+        match = re.search(r"\d+", str(value or ""))
+        return match.group(0) if match else ""
 
     # ================================================================
     # RESULT CONVERSION

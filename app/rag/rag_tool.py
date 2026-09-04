@@ -38,3 +38,9 @@ class RAGTool:
             chunk_type=chunk_type,
             page_number=page_number,
         )
+
+    def get_page_content(self, page_number: int, project_name: str | None = None, document_name: str | None = None):
+        return self._search_service.page_search(page_number, project_name, document_name)
+
+    def get_representative_document_content(self, document_name: str, project_name: str | None = None, limit: int = 16):
+        return self._search_service.representative_document_search(document_name, project_name, limit)

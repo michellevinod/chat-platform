@@ -123,6 +123,19 @@ class PDFExtractor(BaseExtractor):
             blocks.extend(text_blocks)
             block_number += len(text_blocks)
 
+            # OCR is optional: PyMuPDF delegates it to a locally installed
+            # Tesseract data directory. A missing OCR installation must never
+            # make ordinary PDF ingestion fail.
+            if self._needs_ocr(text_blocks):
+                ocr_block = self._extract_ocr_block(
+                    page=page,
+                    page_number=page_number,
+                    block_number=block_number,
+                )
+                if ocr_block:
+                    blocks.append(ocr_block)
+                    block_number += 1
+
             # --------------------------------------------------------
             # 2. Extract tables
             # --------------------------------------------------------
@@ -283,6 +296,42 @@ class PDFExtractor(BaseExtractor):
             )
 
         return pages
+
+    @staticmethod
+    def _extract_ocr_block(
+        page: pymupdf.Page,
+        page_number: int,
+        block_number: int,
+    ) -> RawTextBlock | None:
+        """Return page OCR for image-only PDFs when local OCR is available."""
+        try:
+            text_page = page.get_textpage_ocr(full=True, language="eng")
+            text = page.get_text("text", textpage=text_page).strip()
+        except Exception:
+            return None
+
+        if not text:
+            return None
+
+        return RawTextBlock(
+            page_number=page_number,
+            block_number=block_number,
+            block_type=BlockType.OCR,
+            bbox=(0.0, 0.0, float(page.rect.width), float(page.rect.height)),
+            text=text,
+            metadata={"chunk_type": "ocr", "ocr": True},
+        )
+
+    @staticmethod
+    def _needs_ocr(text_blocks: list[RawTextBlock]) -> bool:
+        """Identify empty or clearly unusable native PDF text conservatively."""
+        text = " ".join((block.text or "") for block in text_blocks).strip()
+        if len(text) < 20:
+            return True
+        printable = sum(character.isprintable() for character in text) / len(text)
+        alpha = sum(character.isalpha() for character in text) / len(text)
+        replacement_ratio = text.count("\ufffd") / len(text)
+        return printable < 0.90 or alpha < 0.15 or replacement_ratio > 0.02
 
     # ================================================================
     # TABLE CAPTION ASSOCIATION

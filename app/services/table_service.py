@@ -33,6 +33,7 @@ class TableService:
         document_name: str | None = None,
         limit: int = 5,
         page_number: int | None = None,
+        table_number: int | str | None = None,
     ) -> list[RetrievedChunk]:
         """
         Retrieve tables using deterministic lookup whenever
@@ -63,8 +64,10 @@ class TableService:
         # 2. EXPLICIT TABLE NUMBER / CAPTION
         # ---------------------------------------------------------
 
-        table_number = self._extract_table_number(
-            query
+        table_number = (
+            str(table_number)
+            if table_number is not None
+            else self._extract_table_number(query)
         )
 
         if table_number is not None:

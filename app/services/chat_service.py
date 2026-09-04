@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.agents.chat_agent import ChatAgent
@@ -163,6 +164,15 @@ class ChatService:
                 original_question=query,
             )
 
+        # A vector neighbour is not evidence by itself. Exact page/table/image
+        # requests are already deterministic; ordinary document questions need
+        # a lexical or strong semantic basis before any answer/LLM call.
+        if (
+            agent_intent in {QueryIntent.RAG_FACTUAL, QueryIntent.RAG_SEARCH, QueryIntent.RAG_SYNTHESIS}
+            and not self._has_sufficient_evidence(query, results)
+        ):
+            return self._no_results(session_id=session_id, original_question=query)
+
         # -------------------------------------------------------------
         # IMAGE
         # -------------------------------------------------------------
@@ -180,6 +190,13 @@ class ChatService:
 
         if agent_intent == QueryIntent.SEARCH_TABLE:
             return self._build_table_response(
+                results=results,
+                project_name=project_name,
+                session_id=session_id,
+            )
+
+        if agent_response.get("page_number") is not None:
+            return self._build_page_response(
                 results=results,
                 project_name=project_name,
                 session_id=session_id,
@@ -262,8 +279,14 @@ class ChatService:
                 original_question=query,
             )
 
+        supporting_markdown, supporting_chunks = (
+            self._render_supporting_evidence(results, best_chunk)
+        )
+        if supporting_markdown:
+            text = f"{text}\n\n{supporting_markdown}"
+
         citations = self._build_citations(
-            [best_chunk],
+            [best_chunk, *supporting_chunks],
             project_name,
         )
 
@@ -273,6 +296,99 @@ class ChatService:
             "citations": citations,
             "session_id": session_id,
         }
+
+    def _build_page_response(
+        self,
+        results: list[Any],
+        project_name: str | None,
+        session_id: str | None,
+    ) -> dict:
+        """Render the selected page in indexed reading order, without an LLM."""
+        text_chunks = [
+            chunk for chunk in results
+            if (getattr(chunk, "chunk_type", "text") or "text").lower() in {"text", "ocr"}
+            and self._clean_response_text(getattr(chunk, "text", ""))
+        ]
+        if not text_chunks:
+            return self._no_results(session_id, "page request")
+        content = "\n\n".join(self._clean_response_text(chunk.text) for chunk in text_chunks)
+        supporting_markdown, supporting = self._render_supporting_evidence(results, text_chunks[0])
+        if supporting_markdown:
+            content = f"{content}\n\n{supporting_markdown}"
+        return {
+            "success": True,
+            "response": content,
+            "citations": self._build_citations([*text_chunks, *supporting], project_name),
+            "session_id": session_id,
+        }
+
+    @staticmethod
+    def _has_sufficient_evidence(query: str, results: list[Any]) -> bool:
+        """Reject unrelated vector neighbours without domain-specific rules."""
+        stop_words = {
+            "what", "which", "where", "when", "why", "how", "does", "did", "is", "are",
+            "the", "a", "an", "this", "that", "document", "say", "about", "show", "me",
+            "tell", "please", "on", "in", "of", "for", "to", "and", "with", "page",
+        }
+        terms = {
+            token for token in re.findall(r"[a-z0-9]+", query.lower())
+            if len(token) >= 3 and token not in stop_words and not token.isdigit()
+        }
+        if not terms:
+            return bool(results)
+
+        for chunk in results:
+            searchable = " ".join(
+                str(getattr(chunk, field, "") or "")
+                for field in ("text", "heading", "section", "table_caption", "image_caption")
+            ).lower()
+            if terms.intersection(re.findall(r"[a-z0-9]+", searchable)):
+                return True
+            if float(getattr(chunk, "score", 0.0) or 0.0) >= 0.72:
+                return True
+        return False
+
+    def _render_supporting_evidence(
+        self,
+        results: list[Any],
+        best_chunk: Any,
+    ) -> tuple[str, list[Any]]:
+        """Attach only visual/table chunks already retrieved for the query."""
+        parts: list[str] = []
+        supporting: list[Any] = []
+
+        for chunk in results:
+            if chunk is best_chunk:
+                continue
+
+            chunk_type = (getattr(chunk, "chunk_type", "") or "").lower()
+            if chunk_type == "table" and not any(
+                (getattr(item, "chunk_type", "") or "").lower() == "table"
+                for item in supporting
+            ):
+                table = self._render_table_markdown(chunk)
+                if table:
+                    caption = getattr(chunk, "table_caption", None) or "Supporting table"
+                    parts.append(f"### {caption}\n\n{table}")
+                    supporting.append(chunk)
+
+            if chunk_type == "image" and not any(
+                (getattr(item, "chunk_type", "") or "").lower() == "image"
+                for item in supporting
+            ):
+                image_name = self._extract_image_name(
+                    getattr(chunk, "image_path", None),
+                    getattr(chunk, "image_id", None),
+                )
+                if image_name:
+                    caption = getattr(chunk, "image_caption", None) or "Supporting figure"
+                    parts.append(f"### {caption}\n\n![Figure](/images/{image_name})")
+                    supporting.append(chunk)
+
+            if len(supporting) == 2:
+                break
+
+        return "\n\n".join(parts), supporting
 
     # =================================================================
     # SYNTHESIS RESPONSE

@@ -191,6 +191,13 @@ class ChatAgent(BaseAgent):
         limit: int = 8,
     ) -> list[Any]:
 
+        if page_number is not None:
+            return self._rag.get_page_content(
+                page_number=page_number,
+                project_name=project_name,
+                document_name=document_name,
+            )
+
         return self._rag.search(
             query=query,
             limit=limit,
@@ -270,18 +277,16 @@ class ChatAgent(BaseAgent):
         Gemini will later synthesize ONLY from these retrieved chunks.
         """
 
-        summary_query = (
-            f"{query} "
-            "main topics sections key points overview"
-        )
+        if document_name:
+            return self._rag.get_representative_document_content(
+                document_name=document_name,
+                project_name=project_name,
+                limit=16,
+            )
 
-        return self._search_rag(
-            query=summary_query,
-            project_name=project_name,
-            document_name=document_name,
-            page_number=None,
-            limit=12,
-        )
+        # A project-level summary retains normal scoped retrieval; a document
+        # summary always uses the representative-document path above.
+        return self._search_rag(query=query, project_name=project_name, document_name=None, limit=12)
 
     # =================================================================
     # PAGE NUMBER

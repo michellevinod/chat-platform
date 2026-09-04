@@ -87,7 +87,10 @@ class IngestionPipeline:
         # Normalize
         # -------------------------------------------------------------
 
-        document = self.normalizer.normalize(document)
+        # The current normalizer is PDF-specific. Other extractors already
+        # return structured blocks and must not be treated as PDF content.
+        if extension == ".pdf":
+            document = self.normalizer.normalize(document)
 
         # -------------------------------------------------------------
         # Resolve metadata dynamically

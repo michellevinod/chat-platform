@@ -106,7 +106,7 @@ class ChunkGenerator:
                 # TEXT
                 # =======================================================
 
-                if block.block_type == BlockType.TEXT:
+                if block.block_type in {BlockType.TEXT, BlockType.OCR}:
 
                     text = (
                         getattr(
@@ -142,8 +142,16 @@ class ChunkGenerator:
                                     "section",
                                     None,
                                 ),
-                                chunk_type="text",
-                                source=source,
+                                chunk_type=(
+                                    "ocr"
+                                    if block.block_type == BlockType.OCR
+                                    else block_metadata.get("chunk_type", "text")
+                                ),
+                                source=(
+                                    "ocr"
+                                    if block.block_type == BlockType.OCR
+                                    else source
+                                ),
                             ),
                         )
                     )

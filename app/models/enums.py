@@ -19,5 +19,6 @@ class BlockType(str, Enum):
     """
 
     TEXT = "text"
+    OCR = "ocr"
     IMAGE = "image"
     TABLE = "table"

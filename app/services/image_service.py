@@ -44,6 +44,7 @@ class ImageService:
         image_id = self._extract_image_filename(
             query
         )
+        image_number = self._extract_figure_number(query)
 
         # ---------------------------------------------------------
         # 1. EXACT IMAGE FILENAME
@@ -57,6 +58,32 @@ class ImageService:
                 image_id=image_id,
                 limit=limit,
             )
+
+        # Figure numbers are explicit image metadata, not page numbers.
+        if image_number is not None:
+            images = self._repository.find_images(
+                collection_name="documents",
+                project_name=project_name,
+                document_name=document_name,
+                image_number=image_number,
+                limit=limit,
+            )
+
+            if images:
+                return images
+
+            # Older records may have labelled values such as "Figure 6".
+            # Inspect only scoped image records and normalize locally.
+            legacy_images = self._repository.find_images(
+                collection_name="documents",
+                project_name=project_name,
+                document_name=document_name,
+                limit=1000,
+            )
+            return [
+                image for image in legacy_images
+                if self._normalize_identifier(getattr(image, "image_number", None)) == image_number
+            ][:limit]
 
         # ---------------------------------------------------------
         # 2. EXACT PAGE
@@ -128,6 +155,22 @@ class ImageService:
             return match.group(1)
 
         return None
+
+    @staticmethod
+    def _extract_figure_number(
+        query: str,
+    ) -> str | None:
+        match = re.search(
+            r"\b(?:figure|fig\.?|image)\s*(?:number|no\.?)?\s*[:#-]?\s*(\d+)\b",
+            query,
+            flags=re.IGNORECASE,
+        )
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _normalize_identifier(value: object) -> str:
+        match = re.search(r"\d+", str(value or ""))
+        return match.group(0) if match else ""
 
     @staticmethod
     def _extract_page_number(

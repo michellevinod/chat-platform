@@ -38,6 +38,11 @@ class PDFNormalizer(BaseNormalizer):
                         block_type=BlockType.TEXT,
                         bbox=block.bbox,
                         text=text,
+                        heading=block.heading,
+                        section=block.section,
+                        reading_order=block.reading_order,
+                        language=block.language,
+                        metadata=dict(block.metadata or {}),
                     )
                 )
 
