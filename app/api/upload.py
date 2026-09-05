@@ -66,8 +66,10 @@ async def upload_document(
 
     document = extractor.extract(saved_path)
 
-    # Normalize
-    document = PDFNormalizer().normalize(document)
+    # This normalizer is PDF-specific; Office extractors already return their
+    # native structured blocks and must not be processed as PDF content.
+    if extension == ".pdf":
+        document = PDFNormalizer().normalize(document)
 
     final_doc_name = document_name or original_filename
     final_proj_name = project_name or "Default Project"
@@ -114,4 +116,4 @@ async def upload_document(
         "project": final_proj_name,
         "document": final_doc_name,
         "chunks_uploaded": len(chunks),
-    }
+    }

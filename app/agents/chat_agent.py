@@ -19,7 +19,10 @@ class ChatAgent(BaseAgent):
     - images -> ImageService
     - tables -> TableService
     - normal questions -> RAGTool
-    - summaries/synthesis -> broad RAG retrieval
+    - summaries/synthesis -> broader RAG retrieval
+
+    The agent is intentionally domain-agnostic. It does not contain
+    document-specific or domain-specific knowledge.
     """
 
     def __init__(
@@ -46,11 +49,79 @@ class ChatAgent(BaseAgent):
         query: str,
         project_name: str | None = None,
         document_name: str | None = None,
+        document_names: list[str] | None = None,
         project_id: str | None = None,
         document_id: str | None = None,
     ) -> dict[str, Any]:
 
         query = (query or "").strip()
+
+        # -------------------------------------------------------------
+        # MULTI-DOCUMENT MODE
+        # -------------------------------------------------------------
+        #
+        # If multiple documents are selected, execute the SAME query
+        # independently against each selected document.
+        #
+        # This keeps retrieval scoped to the selected documents and
+        # avoids mixing the documents before retrieval.
+        # -------------------------------------------------------------
+
+        selected_documents = list(
+            dict.fromkeys(
+                name.strip()
+                for name in (document_names or [])
+                if name and name.strip()
+            )
+        )
+
+        if selected_documents:
+            scoped_responses: list[dict[str, Any]] = []
+
+            for name in selected_documents:
+                scoped_response = self.execute(
+                    query=query,
+                    project_name=project_name,
+                    document_name=name,
+                    document_names=None,
+                    project_id=project_id,
+                    document_id=document_id,
+                )
+
+                if isinstance(scoped_response, dict):
+                    scoped_responses.append(scoped_response)
+
+            if not scoped_responses:
+                return {
+                    "intent": QueryIntent.RAG_FACTUAL,
+                    "query": query,
+                    "results": [],
+                }
+
+            first_response = scoped_responses[0]
+
+            combined_results: list[Any] = []
+
+            for scoped_response in scoped_responses:
+                response_results = scoped_response.get("results", [])
+
+                if isinstance(response_results, list):
+                    combined_results.extend(response_results)
+
+            return {
+                "intent": first_response.get(
+                    "intent",
+                    QueryIntent.RAG_FACTUAL,
+                ),
+                "query": query,
+                "results": combined_results,
+                "page_number": first_response.get("page_number"),
+                "table_number": first_response.get("table_number"),
+            }
+
+        # -------------------------------------------------------------
+        # EMPTY QUERY
+        # -------------------------------------------------------------
 
         if not query:
             return {
@@ -58,6 +129,10 @@ class ChatAgent(BaseAgent):
                 "query": "",
                 "results": [],
             }
+
+        # -------------------------------------------------------------
+        # CLASSIFY QUERY
+        # -------------------------------------------------------------
 
         intent = self._classifier.classify(query)
 
@@ -91,13 +166,17 @@ class ChatAgent(BaseAgent):
                 ),
             }
 
+        # -------------------------------------------------------------
+        # QUERY NORMALIZATION
+        # -------------------------------------------------------------
+
         enhanced_query = self._enhancer.enhance(query)
 
         page_number = self._extract_page_number(query)
         table_number = self._extract_table_number(query)
 
         # -------------------------------------------------------------
-        # IMAGE
+        # IMAGE SEARCH
         # -------------------------------------------------------------
 
         if intent == QueryIntent.SEARCH_IMAGE:
@@ -117,7 +196,7 @@ class ChatAgent(BaseAgent):
             }
 
         # -------------------------------------------------------------
-        # TABLE
+        # TABLE SEARCH
         # -------------------------------------------------------------
 
         if intent == QueryIntent.SEARCH_TABLE:
@@ -139,7 +218,7 @@ class ChatAgent(BaseAgent):
             }
 
         # -------------------------------------------------------------
-        # SUMMARY / PROJECT SUMMARY / AMBIGUOUS SUMMARY
+        # DOCUMENT / PROJECT SUMMARY
         # -------------------------------------------------------------
 
         if intent in {
@@ -161,7 +240,7 @@ class ChatAgent(BaseAgent):
             }
 
         # -------------------------------------------------------------
-        # NORMAL RAG
+        # NORMAL RAG SEARCH
         # -------------------------------------------------------------
 
         results = self._search_rag(
@@ -169,6 +248,7 @@ class ChatAgent(BaseAgent):
             project_name=project_name,
             document_name=document_name,
             page_number=page_number,
+            limit=8,
         )
 
         return {
@@ -191,6 +271,8 @@ class ChatAgent(BaseAgent):
         limit: int = 8,
     ) -> list[Any]:
 
+        # Explicit page request should use exact page retrieval rather
+        # than semantic similarity.
         if page_number is not None:
             return self._rag.get_page_content(
                 page_number=page_number,
@@ -217,12 +299,11 @@ class ChatAgent(BaseAgent):
         document_name: str | None,
         page_number: int | None,
     ) -> list[Any]:
-
         """
-        Use the actual ImageService API.
+        Retrieve images using the actual ImageService API.
 
-        ImageService exposes:
-            get_images(...)
+        Explicit page requests are passed through so the service can
+        perform exact page-scoped retrieval.
         """
 
         return self._image_service.get_images(
@@ -244,12 +325,11 @@ class ChatAgent(BaseAgent):
         page_number: int | None,
         table_number: int | None,
     ) -> list[Any]:
-
         """
-        Use the actual TableService API.
+        Retrieve tables using the actual TableService API.
 
-        TableService exposes:
-            get_tables(...)
+        Table number and page number are passed separately so exact
+        table/page retrieval can be handled by the service.
         """
 
         return self._table_service.get_tables(
@@ -270,11 +350,11 @@ class ChatAgent(BaseAgent):
         project_name: str | None,
         document_name: str | None,
     ) -> list[Any]:
-
         """
         Retrieve broader evidence for summaries.
 
-        Gemini will later synthesize ONLY from these retrieved chunks.
+        Gemini/LLM synthesis happens later in ChatService and receives
+        only the retrieved evidence, never the entire document.
         """
 
         if document_name:
@@ -284,12 +364,15 @@ class ChatAgent(BaseAgent):
                 limit=16,
             )
 
-        # A project-level summary retains normal scoped retrieval; a document
-        # summary always uses the representative-document path above.
-        return self._search_rag(query=query, project_name=project_name, document_name=None, limit=12)
+        return self._search_rag(
+            query="main topics sections key points overview",
+            project_name=project_name,
+            document_name=None,
+            limit=12,
+        )
 
     # =================================================================
-    # PAGE NUMBER
+    # PAGE NUMBER EXTRACTION
     # =================================================================
 
     @staticmethod
@@ -318,7 +401,7 @@ class ChatAgent(BaseAgent):
         return None
 
     # =================================================================
-    # TABLE NUMBER
+    # TABLE NUMBER EXTRACTION
     # =================================================================
 
     @staticmethod

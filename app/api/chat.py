@@ -31,6 +31,7 @@ def chat(
         query=request.query,
         project_name=request.project_name,
         document_name=request.document_name,
+        document_names=request.document_names,
         session_id=request.session_id,
         conversation_id=request.conversation_id,
     )

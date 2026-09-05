@@ -49,7 +49,7 @@ class ChatService:
         self._llm = LLMService()
 
     # =================================================================
-    # MAIN CHAT ENTRY POINT
+        # MAIN CHAT ENTRY POINT
     # =================================================================
 
     def chat(
@@ -57,9 +57,10 @@ class ChatService:
         query: str,
         project_name: str | None = None,
         document_name: str | None = None,
+        document_names: list[str] | None = None,
         session_id: str | None = None,
         conversation_id: str | None = None,
-    ) -> dict:
+        ) -> dict:
         """
         Process one document-chat request.
 
@@ -127,6 +128,7 @@ class ChatService:
             query=query,
             project_name=project_name,
             document_name=document_name,
+            document_names=document_names,
         )
 
         agent_intent = agent_response.get(
@@ -248,7 +250,7 @@ class ChatService:
         results: list[Any],
         project_name: str | None,
         session_id: str | None,
-    ) -> dict:
+        ) -> dict:
         """
         Return the strongest retrieved evidence directly.
 
@@ -260,6 +262,47 @@ class ChatService:
         - preserves exact document wording
         - keeps factual retrieval deterministic
         """
+
+        table_chunk = self._select_relevant_table(
+            query,
+            results,
+        )
+
+        if table_chunk is not None:
+            table_context = self._build_llm_context(
+                [table_chunk]
+            )
+
+            response_text = self._llm.generate_answer(
+                question=query,
+                context=table_context,
+            )
+
+            if (
+                response_text
+                and response_text.strip()
+                and not self._looks_like_no_result(response_text)
+            ):
+                supporting_table = self._render_table_markdown(
+                    table_chunk
+                )
+
+                if supporting_table:
+                    response_text = (
+                        f"{response_text.strip()}\n\n"
+                        f"### Supporting table\n\n"
+                        f"{supporting_table}"
+                    )
+
+            return {
+                "success": True,
+                "response": response_text.strip(),
+                "citations": self._build_citations(
+                    [table_chunk],
+                    project_name,
+                ),
+                "session_id": session_id,
+            }
 
         best_chunk = self._select_best_chunk(results)
 
@@ -302,7 +345,7 @@ class ChatService:
         results: list[Any],
         project_name: str | None,
         session_id: str | None,
-    ) -> dict:
+        ) -> dict:
         """Render the selected page in indexed reading order, without an LLM."""
         text_chunks = [
             chunk for chunk in results
@@ -326,13 +369,13 @@ class ChatService:
     def _has_sufficient_evidence(query: str, results: list[Any]) -> bool:
         """Reject unrelated vector neighbours without domain-specific rules."""
         stop_words = {
-            "what", "which", "where", "when", "why", "how", "does", "did", "is", "are",
-            "the", "a", "an", "this", "that", "document", "say", "about", "show", "me",
-            "tell", "please", "on", "in", "of", "for", "to", "and", "with", "page",
+        "what", "which", "where", "when", "why", "how", "does", "did", "is", "are",
+        "the", "a", "an", "this", "that", "document", "say", "about", "show", "me",
+        "tell", "please", "on", "in", "of", "for", "to", "and", "with", "page",
         }
         terms = {
-            token for token in re.findall(r"[a-z0-9]+", query.lower())
-            if len(token) >= 3 and token not in stop_words and not token.isdigit()
+        token for token in re.findall(r"[a-z0-9]+", query.lower())
+        if len(token) >= 3 and token not in stop_words and not token.isdigit()
         }
         if not terms:
             return bool(results)
@@ -348,11 +391,31 @@ class ChatService:
                 return True
         return False
 
+    @staticmethod
+    def _select_relevant_table(query: str, results: list[Any]) -> Any | None:
+        """Prefer a table when its actual cells support a factual question."""
+        stop_words = {"what", "which", "where", "when", "why", "how", "does", "is", "are", "the", "a", "an", "this", "that", "document", "say", "about", "show", "me", "on", "in", "of", "for", "to", "and", "with"}
+        terms = {
+        token for token in re.findall(r"[a-z0-9]+", query.lower())
+        if len(token) >= 3 and token not in stop_words
+        }
+        if not terms:
+            return None
+        for chunk in results:
+            if (getattr(chunk, "chunk_type", "") or "").lower() != "table":
+                continue
+            content = " ".join(
+                [str(getattr(chunk, "table_caption", "") or ""), str(getattr(chunk, "text", "") or "")]
+            ).lower()
+            if terms.intersection(re.findall(r"[a-z0-9]+", content)):
+                return chunk
+        return None
+
     def _render_supporting_evidence(
         self,
         results: list[Any],
         best_chunk: Any,
-    ) -> tuple[str, list[Any]]:
+        ) -> tuple[str, list[Any]]:
         """Attach only visual/table chunks already retrieved for the query."""
         parts: list[str] = []
         supporting: list[Any] = []
@@ -400,7 +463,7 @@ class ChatService:
         results: list[Any],
         project_name: str | None,
         session_id: str | None,
-    ) -> dict:
+        ) -> dict:
         """
         Use Gemini only for genuine synthesis.
 
@@ -446,7 +509,7 @@ class ChatService:
     @staticmethod
     def _build_llm_context(
         results: list[Any],
-    ) -> str:
+        ) -> str:
         """
         Convert retrieved chunks into a controlled evidence context.
 
@@ -533,7 +596,7 @@ class ChatService:
         results: list[Any],
         project_name: str | None,
         session_id: str | None,
-    ) -> dict:
+        ) -> dict:
         """
         Render the best retrieved image.
 
@@ -626,7 +689,7 @@ class ChatService:
         results: list[Any],
         project_name: str | None,
         session_id: str | None,
-    ) -> dict:
+        ) -> dict:
         """
         Render structured table data directly.
 
@@ -712,7 +775,7 @@ class ChatService:
     @staticmethod
     def _render_table_markdown(
         chunk,
-    ) -> str:
+        ) -> str:
         """
         Render structured table data.
 
@@ -884,7 +947,7 @@ class ChatService:
     @staticmethod
     def _clean_table_cell(
         value,
-    ) -> str:
+        ) -> str:
         """
         Normalize a single table cell.
         """
@@ -905,6 +968,33 @@ class ChatService:
 
         return text
 
+
+    @staticmethod
+    def _looks_like_no_result(
+        text: str,
+        ) -> bool:
+        """
+        Detect an empty or standard grounded-retrieval refusal.
+
+        No document/domain-specific terms are used.
+        """
+        normalized = " ".join(
+            (text or "").lower().split()
+        )
+
+        if not normalized:
+            return True
+
+        refusal_phrases = (
+            "i couldn't find relevant information",
+            "i could not find relevant information",
+        )
+
+        return any(
+            phrase in normalized
+            for phrase in refusal_phrases
+        )
+
     # =================================================================
     # BEST RESULT SELECTION
     # =================================================================
@@ -912,7 +1002,7 @@ class ChatService:
     @staticmethod
     def _select_best_chunk(
         results: list[Any],
-    ) -> Any | None:
+        ) -> Any | None:
         """
         Select the highest-ranked usable text result.
 
@@ -959,7 +1049,7 @@ class ChatService:
     @staticmethod
     def _clean_response_text(
         text: Any,
-    ) -> str:
+        ) -> str:
         """
         Clean retrieved text before showing it to the user.
 
@@ -1008,7 +1098,7 @@ class ChatService:
     def _build_citation(
         chunk,
         project_name: str | None,
-    ) -> dict:
+        ) -> dict:
         """
         Build a clean user-facing citation.
 
@@ -1050,7 +1140,7 @@ class ChatService:
         self,
         results: list[Any],
         project_name: str | None,
-    ) -> list[dict]:
+        ) -> list[dict]:
         """
         Deduplicate citations by document/page/type.
         """
@@ -1086,7 +1176,7 @@ class ChatService:
         self,
         session_id: str | None,
         original_question: str,
-    ) -> dict:
+        ) -> dict:
         """
         Safe response when retrieval produced no usable evidence.
         """
@@ -1106,7 +1196,7 @@ class ChatService:
     def _extract_image_name(
         image_path: str | None,
         image_id: str | None,
-    ) -> str | None:
+        ) -> str | None:
         """
         Extract ONLY the public image filename.
 

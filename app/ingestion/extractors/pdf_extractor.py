@@ -111,7 +111,7 @@ class PDFExtractor(BaseExtractor):
             block_number = 0
 
             # --------------------------------------------------------
-            # 1. Extract text blocks
+            # 1. Extract text
             # --------------------------------------------------------
 
             text_blocks = self._extract_text_blocks(
@@ -120,21 +120,27 @@ class PDFExtractor(BaseExtractor):
                 start_block_number=block_number,
             )
 
-            blocks.extend(text_blocks)
-            block_number += len(text_blocks)
-
-            # OCR is optional: PyMuPDF delegates it to a locally installed
-            # Tesseract data directory. A missing OCR installation must never
-            # make ordinary PDF ingestion fail.
             if self._needs_ocr(text_blocks):
+                # Native PDF text is empty/corrupted/unusable.
+                # Prefer OCR rather than indexing corrupted characters.
                 ocr_block = self._extract_ocr_block(
                     page=page,
                     page_number=page_number,
                     block_number=block_number,
                 )
+
                 if ocr_block:
                     blocks.append(ocr_block)
                     block_number += 1
+                else:
+                    # OCR is unavailable. Keep the native text only if it is
+                    # actually usable; otherwise do not index corrupted text.
+                    if self._has_usable_text(text_blocks):
+                        blocks.extend(text_blocks)
+                        block_number += len(text_blocks)
+            else:
+                blocks.extend(text_blocks)
+                block_number += len(text_blocks)
 
             # --------------------------------------------------------
             # 2. Extract tables
@@ -220,16 +226,12 @@ class PDFExtractor(BaseExtractor):
                                 ]
                             )
                         else:
-                            table_number = str(
-                                tab_idx + 1
-                            )
-
-                            caption = (
-                                f"Table "
-                                f"{table_number} "
-                                f"on Page "
-                                f"{page_number}"
-                            )
+                            # Per-page extraction order is not a document
+                            # table number. Never fabricate identifiers: an
+                            # exact "Table N" request must be based on a
+                            # real caption/metadata only.
+                            table_number = None
+                            caption = f"Table on Page {page_number}"
 
                         blocks.append(
                             RawTableBlock(
@@ -332,6 +334,45 @@ class PDFExtractor(BaseExtractor):
         alpha = sum(character.isalpha() for character in text) / len(text)
         replacement_ratio = text.count("\ufffd") / len(text)
         return printable < 0.90 or alpha < 0.15 or replacement_ratio > 0.02
+
+
+    @staticmethod
+    def _has_usable_text(
+        text_blocks: list[RawTextBlock],
+    ) -> bool:
+        """
+        Confirm that native PDF text contains enough readable characters
+        to be safely indexed.
+
+        This is deliberately domain-agnostic.
+        """
+        text = " ".join(
+            (block.text or "")
+            for block in text_blocks
+        ).strip()
+
+        if not text:
+            return False
+
+        printable_ratio = (
+            sum(character.isprintable() for character in text)
+            / len(text)
+        )
+
+        alphabetic_ratio = (
+            sum(character.isalpha() for character in text)
+            / len(text)
+        )
+
+        replacement_ratio = (
+            text.count("\ufffd") / len(text)
+        )
+
+        return (
+            printable_ratio >= 0.90
+            and alphabetic_ratio >= 0.15
+            and replacement_ratio <= 0.02
+        )
 
     # ================================================================
     # TABLE CAPTION ASSOCIATION

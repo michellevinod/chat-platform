@@ -19,6 +19,10 @@ class ChatRequest(BaseModel):
         default=None,
         description="Optional document filter",
     )
+    document_names: list[str] = Field(
+        default_factory=list,
+        description="Optional selected-document scope for multi-document chat",
+    )
     session_id: str | None = Field(
         default=None,
         description="Optional session ID for conversational memory",
@@ -49,4 +53,4 @@ class ChatResponse(BaseModel):
     success: bool
     response: str
     citations: list[Citation] = Field(default_factory=list)
-    session_id: str | None = None
+    session_id: str | None = None

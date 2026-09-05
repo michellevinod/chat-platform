@@ -6,6 +6,7 @@ const API_BASE = "http://127.0.0.1:8000";
 
 let currentProject = "";
 let currentDocument = "";
+let selectedDocuments = new Set();
 let sessionId = crypto.randomUUID();
 let conversationId = sessionId;
 
@@ -210,6 +211,7 @@ function clearDocuments() {
     }
 
     currentDocument = "";
+    selectedDocuments.clear();
 
     updateDocumentHeader();
 }
@@ -316,23 +318,26 @@ function renderDocuments(documents) {
             return;
         }
 
-        const button = documentElement("button");
-
-        button.className = "document-item";
-
-        if (name === currentDocument) {
-            button.classList.add("active");
-        }
-
-        button.textContent = name;
-        button.title = name;
-
-        button.addEventListener("click", () => {
-            selectDocument(name);
-        });
-
-        list.appendChild(button);
+        const row = documentElement("div");
+        row.className = "document-item";
+        const checkbox = documentElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = selectedDocuments.has(name);
+        checkbox.addEventListener("change", () => toggleDocument(name, checkbox.checked));
+        const label = documentElement("span");
+        label.textContent = name;
+        label.title = name;
+        const remove = documentElement("button");
+        remove.type = "button";
+        remove.className = "document-delete";
+        remove.textContent = "×";
+        remove.title = `Delete ${name}`;
+        remove.addEventListener("click", () => openDeleteModal(name));
+        row.append(checkbox, label, remove);
+        list.appendChild(row);
     });
+
+    updateSelectionStatus();
 }
 
 
@@ -342,22 +347,29 @@ function documentElement(tag) {
 
 
 function selectDocument(documentName) {
+    selectedDocuments = new Set([documentName]);
     currentDocument = documentName;
-
-    const items = document.querySelectorAll(".document-item");
-
-    items.forEach(item => {
-        item.classList.toggle(
-            "active",
-            item.textContent === documentName
-        );
-    });
+    renderDocuments(Array.from(document.querySelectorAll(".document-item span")).map(item => item.textContent));
 
     updateDocumentHeader();
 
     clearChat();
 
     showToast(`Selected document: ${documentName}`);
+}
+
+function toggleDocument(documentName, selected) {
+    if (selected) selectedDocuments.add(documentName);
+    else selectedDocuments.delete(documentName);
+    currentDocument = selectedDocuments.values().next().value || "";
+    updateSelectionStatus();
+    updateDocumentHeader();
+    clearChat();
+}
+
+function updateSelectionStatus() {
+    const status = $("selectionStatus");
+    if (status) status.textContent = `Selected: ${selectedDocuments.size} document${selectedDocuments.size === 1 ? "" : "s"}`;
 }
 
 
@@ -378,7 +390,7 @@ function updateDocumentHeader() {
         return;
     }
 
-    if (!currentDocument) {
+    if (!selectedDocuments.size) {
         if (title) {
             title.textContent = currentProject;
         }
@@ -470,6 +482,7 @@ async function uploadDocument(file) {
 
         // Automatically select uploaded document.
         currentDocument = file.name;
+        selectedDocuments = new Set([file.name]);
 
         renderDocuments(
             await getDocumentsForCurrentProject()
@@ -703,14 +716,20 @@ function appendMessage(role, content, citations = []) {
     bubble.className = "message-bubble";
 
     if (role === "assistant") {
+        // Backend Markdown intentionally contains safe relative API paths.
+        // Resolve image links against the API, not the static frontend host.
+        const renderedContent = (content || "").replace(
+            /\]\(\/images\//g,
+            `](${API_BASE}/images/`
+        );
         if (typeof marked !== "undefined") {
             try {
-                bubble.innerHTML = marked.parse(content || "");
+                bubble.innerHTML = marked.parse(renderedContent);
             } catch {
-                bubble.textContent = content || "";
+                bubble.textContent = renderedContent;
             }
         } else {
-            bubble.textContent = content || "";
+            bubble.textContent = renderedContent;
         }
     } else {
         bubble.textContent = content || "";
@@ -844,9 +863,9 @@ async function sendMessage() {
         return;
     }
 
-    if (!currentDocument) {
+    if (!selectedDocuments.size) {
         showToast(
-            "Please select a document first.",
+            "Please select at least one document first.",
             true
         );
 
@@ -874,6 +893,7 @@ async function sendMessage() {
             query: query,
             project_name: currentProject,
             document_name: currentDocument,
+            document_names: Array.from(selectedDocuments),
             session_id: sessionId,
             conversation_id: conversationId
         };
@@ -942,6 +962,7 @@ function setupProjectSelection() {
     select.addEventListener("change", async () => {
         currentProject = select.value;
         currentDocument = "";
+        selectedDocuments.clear();
 
         updateDocumentHeader();
         clearChat();
@@ -1042,6 +1063,30 @@ function setupRefreshDocuments() {
     });
 }
 
+function setupDocumentSelectionControls() {
+    $("selectAllDocumentsBtn")?.addEventListener("click", () => {
+        const names = Array.from(document.querySelectorAll(".document-item span"))
+            .map(item => item.textContent)
+            .filter(Boolean);
+        selectedDocuments = new Set(names);
+        currentDocument = names[0] || "";
+        renderDocuments(names);
+        updateDocumentHeader();
+        clearChat();
+    });
+
+    $("clearSelectionBtn")?.addEventListener("click", () => {
+        selectedDocuments.clear();
+        currentDocument = "";
+        const names = Array.from(document.querySelectorAll(".document-item span"))
+            .map(item => item.textContent)
+            .filter(Boolean);
+        renderDocuments(names);
+        updateDocumentHeader();
+        clearChat();
+    });
+}
+
 
 function setupChat() {
     const input = $("chatInput");
@@ -1118,11 +1163,193 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupProjectSelection();
     setupUpload();
     setupRefreshDocuments();
+    setupDocumentSelectionControls();
     setupChat();
     setupDelete();
+
+
+    const createProjectButton = $("createProjectBtn");
+
+    if (createProjectButton) {
+        createProjectButton.addEventListener(
+            "click",
+            createProject
+        );
+    }
+
+    const renameProjectButton = $("renameProjectBtn");
+
+    if (renameProjectButton) {
+    renameProjectButton.addEventListener(
+            "click",
+            renameProject
+        );
+    }
 
     updateDocumentHeader();
 
     await checkApiConnection();
     await loadProjects();
 });
+
+
+
+// ================================================================
+// PROJECT MANAGEMENT
+// ================================================================
+
+async function createProject() {
+    const name = window.prompt("Enter a name for the new project:");
+
+    if (name === null) {
+        return;
+    }
+
+    const trimmedName = name.trim();
+
+    if (!trimmedName) {
+        showToast("Project name cannot be empty.", "error");
+        return;
+    }
+
+    try {
+        const response = await fetch(
+            `${API_BASE}/projects`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    name: trimmedName
+                })
+            }
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                data.detail || "Could not create project."
+            );
+        }
+
+        showToast(
+            `Project "${trimmedName}" created successfully.`
+        );
+
+        await loadProjects();
+
+        const projectSelect = $("projectSelect");
+
+        if (projectSelect) {
+            projectSelect.value = trimmedName;
+            projectSelect.dispatchEvent(
+                new Event("change")
+            );
+        }
+
+    } catch (error) {
+        console.error(
+            "Create project error:",
+            error
+        );
+
+        showToast(
+            error.message ||
+            "Could not create project.",
+            "error"
+        );
+    }
+}
+
+
+async function renameProject() {
+    if (!currentProject) {
+        showToast(
+            "Select a project first.",
+            "error"
+        );
+        return;
+    }
+
+    const newName = window.prompt(
+        "Enter the new project name:",
+        currentProject
+    );
+
+    if (newName === null) {
+        return;
+    }
+
+    const trimmedName = newName.trim();
+
+    if (!trimmedName) {
+        showToast(
+            "Project name cannot be empty.",
+            "error"
+        );
+        return;
+    }
+
+    if (trimmedName === currentProject) {
+        return;
+    }
+
+    try {
+        const response = await fetch(
+            `${API_BASE}/projects`,
+            {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    old_name: currentProject,
+                    new_name: trimmedName
+                })
+            }
+        );
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                data.detail ||
+                "Could not rename project."
+            );
+        }
+
+        showToast(
+            `Project renamed to "${trimmedName}".`
+        );
+
+        currentProject = trimmedName;
+        selectedDocuments.clear();
+
+        await loadProjects();
+
+        const projectSelect = $("projectSelect");
+
+        if (projectSelect) {
+            projectSelect.value = trimmedName;
+        }
+
+        await loadDocuments();
+
+        updateSelectionStatus();
+        updateDocumentHeader();
+
+    } catch (error) {
+        console.error(
+            "Rename project error:",
+            error
+        );
+
+        showToast(
+            error.message ||
+            "Could not rename project.",
+            "error"
+        );
+    }
+}

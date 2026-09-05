@@ -1,0 +1,12 @@
+{
+  "projects": [
+    {
+      "id": "project_e9b9836cc7af",
+      "name": "Project_Test1"
+    },
+    {
+      "id": "project_c0769c8bcdf9",
+      "name": "Test Project Renamed"
+    }
+  ]
+}

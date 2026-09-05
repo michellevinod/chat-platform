@@ -192,6 +192,81 @@ class QdrantRepository:
             wait=True,
         )
 
+
+
+
+        # ================================================================
+    # PROJECT RENAME
+    # ================================================================
+
+    def rename_project(
+        self,
+        old_name: str,
+        new_name: str,
+        collection_name: str | None = None,
+    ) -> None:
+        collection = (
+            collection_name
+            or os.getenv(
+                "QDRANT_COLLECTION",
+                "documents",
+            )
+        )
+
+        project_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="project_name",
+                    match=MatchValue(
+                        value=old_name,
+                    ),
+                )
+            ]
+        )
+
+        self._client.set_payload(
+            collection_name=collection,
+            payload={
+                "project_name": new_name,
+            },
+            points=project_filter,
+            wait=True,
+        )
+
+    # ================================================================
+    # PROJECT DELETE
+    # ================================================================
+
+    def delete_project(
+        self,
+        project_name: str,
+        collection_name: str | None = None,
+    ) -> None:
+        collection = (
+            collection_name
+            or os.getenv(
+                "QDRANT_COLLECTION",
+                "documents",
+            )
+        )
+
+        project_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="project_name",
+                    match=MatchValue(
+                        value=project_name,
+                    ),
+                )
+            ]
+        )
+
+        self._client.delete(
+            collection_name=collection,
+            points_selector=project_filter,
+            wait=True,
+        )
+
     # ================================================================
     # SEMANTIC SEARCH
     # ================================================================
