@@ -40,7 +40,8 @@ class ChatService:
     """
 
     NO_RESULTS_MESSAGE = (
-        "I couldn't find relevant information in the uploaded documents."
+        "I couldn't find relevant information in the uploaded documents. "
+        "I can answer only from uploaded documents."
     )
 
     def __init__(self) -> None:
@@ -120,6 +121,18 @@ class ChatService:
                 "session_id": session_id,
             }
 
+        if (
+            intent == QueryIntent.AMBIGUOUS_DOCUMENT
+            and not document_name
+            and not document_names
+        ):
+            return {
+                "success": True,
+                "response": "Which document would you like me to summarize?",
+                "citations": [],
+                "session_id": session_id,
+            }
+
         # -------------------------------------------------------------
         # RETRIEVE EVIDENCE
         # -------------------------------------------------------------
@@ -170,7 +183,7 @@ class ChatService:
         # requests are already deterministic; ordinary document questions need
         # a lexical or strong semantic basis before any answer/LLM call.
         if (
-            agent_intent in {QueryIntent.RAG_FACTUAL, QueryIntent.RAG_SEARCH, QueryIntent.RAG_SYNTHESIS}
+            agent_intent in {QueryIntent.RAG_FACTUAL, QueryIntent.RAG_SEARCH, QueryIntent.RAG_SYNTHESIS, QueryIntent.RAG_ENUMERATION}
             and not self._has_sufficient_evidence(query, results)
         ):
             return self._no_results(session_id=session_id, original_question=query)
@@ -215,6 +228,7 @@ class ChatService:
             QueryIntent.DOCUMENT_SUMMARY,
             QueryIntent.PROJECT_SUMMARY,
             QueryIntent.RAG_SYNTHESIS,
+            QueryIntent.RAG_ENUMERATION,
         }:
             return self._build_synthesis_response(
                 query=query,
@@ -277,6 +291,12 @@ class ChatService:
                 question=query,
                 context=table_context,
             )
+
+            if self._looks_like_no_result(response_text):
+                return self._no_results(
+                    session_id=session_id,
+                    original_question=query,
+                )
 
             if (
                 response_text
@@ -371,7 +391,7 @@ class ChatService:
         stop_words = {
         "what", "which", "where", "when", "why", "how", "does", "did", "is", "are",
         "the", "a", "an", "this", "that", "document", "say", "about", "show", "me",
-        "tell", "please", "on", "in", "of", "for", "to", "and", "with", "page",
+        "tell", "please", "on", "in", "of", "for", "to", "and", "with", "page", "from", "into", "than", "then",
         }
         terms = {
         token for token in re.findall(r"[a-z0-9]+", query.lower())
@@ -484,7 +504,11 @@ class ChatService:
         )
 
         # The LLM service already has a safe fallback.
-        if not response_text or not response_text.strip():
+        if (
+            not response_text
+            or not response_text.strip()
+            or self._looks_like_no_result(response_text)
+        ):
             return self._no_results(
                 session_id=session_id,
                 original_question=query,
@@ -521,7 +545,7 @@ class ChatService:
 
         # Limit evidence so we do not waste Gemini quota sending
         # excessive duplicate material.
-        for index, chunk in enumerate(results[:12], start=1):
+        for index, chunk in enumerate(results[:24], start=1):
             text = ChatService._clean_response_text(
                 getattr(chunk, "text", "")
             )
@@ -1012,6 +1036,7 @@ class ChatService:
         Image/table chunks are skipped for normal factual responses.
         """
 
+        usable = []
         for chunk in results:
             chunk_type = (
                 getattr(
@@ -1038,9 +1063,24 @@ class ChatService:
             ).strip()
 
             if text:
-                return chunk
+                usable.append(chunk)
 
-        return None
+        if not usable:
+            return None
+
+        best = usable[0]
+        best_text = str(getattr(best, "text", "") or "").strip()
+        if len(best_text) < 100:
+            same_page = [
+                chunk for chunk in usable[:8]
+                if getattr(chunk, "document_name", None) == getattr(best, "document_name", None)
+                and getattr(chunk, "page_number", None) == getattr(best, "page_number", None)
+                and len(str(getattr(chunk, "text", "") or "").strip()) > len(best_text)
+            ]
+            if same_page:
+                return max(same_page, key=lambda chunk: len(str(getattr(chunk, "text", "") or "")))
+
+        return best
 
     # =================================================================
     # RESPONSE TEXT CLEANING

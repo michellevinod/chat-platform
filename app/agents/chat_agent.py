@@ -248,7 +248,7 @@ class ChatAgent(BaseAgent):
             project_name=project_name,
             document_name=document_name,
             page_number=page_number,
-            limit=8,
+            limit=12 if intent == QueryIntent.RAG_ENUMERATION else 8,
         )
 
         return {

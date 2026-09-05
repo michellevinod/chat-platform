@@ -46,6 +46,7 @@ class SearchService:
         return self._repository.search(
             collection_name="documents",
             query_vector=embedding,
+            query_text=query,
             limit=limit,
             project_name=project_name,
             document_name=document_name,

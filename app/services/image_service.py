@@ -80,10 +80,24 @@ class ImageService:
                 document_name=document_name,
                 limit=1000,
             )
-            return [
+            matching_images = [
                 image for image in legacy_images
                 if self._normalize_identifier(getattr(image, "image_number", None)) == image_number
-            ][:limit]
+            ]
+            if matching_images:
+                return matching_images[:limit]
+
+            ordered_images = sorted(
+                legacy_images,
+                key=lambda image: (
+                    getattr(image, "page_number", 0),
+                    getattr(image, "chunk_number", 0),
+                ),
+            )
+            ordinal = int(image_number) - 1
+            if 0 <= ordinal < len(ordered_images):
+                return [ordered_images[ordinal]]
+            return []
 
         # ---------------------------------------------------------
         # 2. EXACT PAGE

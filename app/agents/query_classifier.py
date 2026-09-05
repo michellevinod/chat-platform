@@ -19,6 +19,7 @@ class QueryIntent(str, Enum):
     RAG_FACTUAL = "rag_factual"
     RAG_SYNTHESIS = "rag_synthesis"
     RAG_SEARCH = "rag_search"
+    RAG_ENUMERATION = "rag_enumeration"
 
 
 class QueryClassifier:
@@ -201,6 +202,14 @@ class QueryClassifier:
             cls.SYNTHESIS_TERMS,
         ):
             return QueryIntent.RAG_SYNTHESIS
+
+        if (
+            re.search(r"\b(list|enumerate|names|all)\b", lowered)
+            or re.search(r"\bwhat are\b|\bwhich are\b", lowered)
+            or re.search(r"\bgive me\b", lowered)
+            or re.search(r"\bwhat\s+[a-z][a-z -]{1,35}\b(?:does|do|did|can)\b", lowered)
+        ):
+            return QueryIntent.RAG_ENUMERATION
 
         # ---------------------------------------------------------
         # DEFAULT

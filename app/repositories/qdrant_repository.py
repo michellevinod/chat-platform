@@ -29,9 +29,7 @@ class QdrantRepository:
         port: int = 6333,
     ) -> None:
 
-        qdrant_url = os.getenv(
-            "QDRANT_URL"
-        )
+        qdrant_url = os.getenv("QDRANT_URL")
 
         api_key = (
             os.getenv("QDRANT_API_KEY")
@@ -39,14 +37,11 @@ class QdrantRepository:
         )
 
         if qdrant_url:
-
             self._client = QdrantClient(
                 url=qdrant_url,
                 api_key=api_key,
             )
-
         else:
-
             self._client = QdrantClient(
                 host=host,
                 port=port,
@@ -192,10 +187,7 @@ class QdrantRepository:
             wait=True,
         )
 
-
-
-
-        # ================================================================
+    # ================================================================
     # PROJECT RENAME
     # ================================================================
 
@@ -205,6 +197,7 @@ class QdrantRepository:
         new_name: str,
         collection_name: str | None = None,
     ) -> None:
+
         collection = (
             collection_name
             or os.getenv(
@@ -242,6 +235,7 @@ class QdrantRepository:
         project_name: str,
         collection_name: str | None = None,
     ) -> None:
+
         collection = (
             collection_name
             or os.getenv(
@@ -275,6 +269,7 @@ class QdrantRepository:
         self,
         collection_name: str,
         query_vector: list[float],
+        query_text: str | None = None,
         limit: int = 8,
         project_name: str | None = None,
         document_name: str | None = None,
@@ -288,12 +283,6 @@ class QdrantRepository:
         Perform vector similarity search with optional metadata filters.
 
         Metadata filters are applied BEFORE semantic ranking.
-
-        This allows queries such as:
-
-            image on page 44
-            image_id = img_xxx.png
-            tables from a specific document
         """
 
         must_conditions: list[FieldCondition] = []
@@ -303,7 +292,6 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if project_name:
-
             must_conditions.append(
                 FieldCondition(
                     key="project_name",
@@ -314,7 +302,6 @@ class QdrantRepository:
             )
 
         elif project_id:
-
             must_conditions.append(
                 FieldCondition(
                     key="project_id",
@@ -329,7 +316,6 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if document_name:
-
             must_conditions.append(
                 FieldCondition(
                     key="document_name",
@@ -340,7 +326,6 @@ class QdrantRepository:
             )
 
         elif document_id:
-
             must_conditions.append(
                 FieldCondition(
                     key="document_id",
@@ -355,7 +340,6 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if chunk_type:
-
             must_conditions.append(
                 FieldCondition(
                     key="chunk_type",
@@ -370,7 +354,6 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if page_number is not None:
-
             must_conditions.append(
                 FieldCondition(
                     key="page_number",
@@ -385,7 +368,6 @@ class QdrantRepository:
         # ------------------------------------------------------------
 
         if image_id:
-
             must_conditions.append(
                 FieldCondition(
                     key="image_id",
@@ -407,13 +389,171 @@ class QdrantRepository:
             collection_name=collection_name,
             query=query_vector,
             query_filter=query_filter,
-            limit=limit,
+            limit=max(limit * 4, 32),
             with_payload=True,
         )
 
-        return self._convert_results(
-            response.points
+        semantic = self._convert_results(response.points)
+        candidates = {self._result_key(chunk): chunk for chunk in semantic}
+
+        if query_text:
+            lexical_points: list = []
+            offset = None
+            while True:
+                points, next_offset = self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=query_filter,
+                    limit=256,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                lexical_points.extend(points)
+                if next_offset is None:
+                    break
+                offset = next_offset
+
+            terms = self._query_terms(query_text)
+            for chunk in self._convert_results(lexical_points):
+                searchable = " ".join(
+                    str(getattr(chunk, field, "") or "")
+                    for field in (
+                        "text", "heading", "section", "table_caption",
+                        "image_caption", "table_headers",
+                    )
+                ).lower()
+                tokens = set(re.findall(r"[a-z0-9]+", searchable))
+                overlap = terms.intersection(tokens)
+                if not overlap:
+                    continue
+                lexical_score = min(
+                    0.98,
+                    0.55 + 0.35 * len(overlap) / max(len(terms), 1),
+                )
+                key = self._result_key(chunk)
+                if key not in candidates or lexical_score > candidates[key].score:
+                    chunk.score = lexical_score
+                    candidates[key] = chunk
+
+        ranked = sorted(candidates.values(), key=lambda item: item.score, reverse=True)
+        return self.expand_context(
+            collection_name=collection_name,
+            seeds=ranked[:max(limit, 12)],
+            limit=max(limit * 4, 24),
+            project_name=project_name,
+            document_name=document_name,
         )
+
+    @staticmethod
+    def _query_terms(query: str) -> set[str]:
+        stop_words = {
+            "what", "which", "where", "when", "why", "how", "does", "did",
+            "is", "are", "the", "a", "an", "this", "that", "document", "say",
+            "about", "show", "me", "tell", "please", "on", "in", "of", "for",
+            "to", "and", "with", "all", "list", "give", "her", "his",
+        }
+        return {
+            token for token in re.findall(r"[a-z0-9]+", query.lower())
+            if len(token) >= 3 and token not in stop_words and not token.isdigit()
+        }
+
+    @staticmethod
+    def _result_key(chunk: RetrievedChunk) -> tuple[str, int, int, str]:
+        return (
+            chunk.document_name,
+            chunk.page_number,
+            chunk.chunk_number,
+            chunk.chunk_type,
+        )
+
+    def expand_context(
+        self,
+        collection_name: str,
+        seeds: list[RetrievedChunk],
+        limit: int = 24,
+        project_name: str | None = None,
+        document_name: str | None = None,
+        window: int = 2,
+    ) -> list[RetrievedChunk]:
+        """Add bounded reading-order context around relevant chunks."""
+        if not seeds:
+            return []
+
+        must = []
+        if project_name:
+            must.append(FieldCondition(key="project_name", match=MatchValue(value=project_name)))
+        if document_name:
+            must.append(FieldCondition(key="document_name", match=MatchValue(value=document_name)))
+        scoped_filter = Filter(must=must) if must else None
+
+        points: list = []
+        offset = None
+        while True:
+            batch, next_offset = self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=scoped_filter,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points.extend(batch)
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        all_chunks = self._convert_results(points)
+        seed_keys = {self._result_key(seed) for seed in seeds}
+        by_document = {}
+        for chunk in all_chunks:
+            by_document.setdefault(chunk.document_name, []).append(chunk)
+
+        selected = {}
+        for seed in seeds:
+            siblings = sorted(
+                by_document.get(seed.document_name, []),
+                key=lambda item: (item.page_number, item.chunk_number),
+            )
+            try:
+                index = next(
+                    index for index, item in enumerate(siblings)
+                    if self._result_key(item) == self._result_key(seed)
+                )
+            except StopIteration:
+                continue
+            for item in siblings[max(0, index - window):index + window + 1]:
+                key = self._result_key(item)
+                if key not in selected or key in seed_keys:
+                    if key == self._result_key(seed):
+                        item.score = seed.score
+                    selected[key] = item
+
+        ordered: list[RetrievedChunk] = []
+        seen: set[tuple[str, int, int, str]] = set()
+        for seed in seeds:
+            siblings = sorted(
+                by_document.get(seed.document_name, []),
+                key=lambda item: (item.page_number, item.chunk_number),
+            )
+            try:
+                index = next(
+                    index for index, item in enumerate(siblings)
+                    if self._result_key(item) == self._result_key(seed)
+                )
+            except StopIteration:
+                continue
+            nearby = (
+                siblings[index:index + window + 1]
+                + siblings[max(0, index - window):index]
+            )
+            for item in nearby:
+                key = self._result_key(item)
+                if key in selected and key not in seen:
+                    ordered.append(selected[key])
+                    seen.add(key)
+                if len(ordered) >= limit:
+                    return ordered
+        return ordered
 
     # ================================================================
     # EXACT METADATA SEARCH
@@ -433,10 +573,6 @@ class QdrantRepository:
         Retrieve image chunks using exact metadata.
 
         No embedding/vector similarity is used.
-
-        This is the correct path for:
-            - exact image filename
-            - exact page image
         """
 
         must_conditions: list[FieldCondition] = [
@@ -449,7 +585,6 @@ class QdrantRepository:
         ]
 
         if project_name:
-
             must_conditions.append(
                 FieldCondition(
                     key="project_name",
@@ -460,7 +595,6 @@ class QdrantRepository:
             )
 
         if document_name:
-
             must_conditions.append(
                 FieldCondition(
                     key="document_name",
@@ -471,7 +605,6 @@ class QdrantRepository:
             )
 
         if page_number is not None:
-
             must_conditions.append(
                 FieldCondition(
                     key="page_number",
@@ -482,7 +615,6 @@ class QdrantRepository:
             )
 
         if image_id:
-
             must_conditions.append(
                 FieldCondition(
                     key="image_id",
@@ -493,7 +625,6 @@ class QdrantRepository:
             )
 
         if image_number is not None:
-
             must_conditions.append(
                 FieldCondition(
                     key="image_number",
@@ -526,19 +657,56 @@ class QdrantRepository:
         document_name: str | None = None,
         limit: int = 100,
     ) -> list[RetrievedChunk]:
-        """Return all indexed evidence from one page in document order."""
-        must = [FieldCondition(key="page_number", match=MatchValue(value=page_number))]
+        """
+        Return all indexed evidence from one page in document order.
+        """
+
+        must = [
+            FieldCondition(
+                key="page_number",
+                match=MatchValue(
+                    value=page_number,
+                ),
+            )
+        ]
+
         if project_name:
-            must.append(FieldCondition(key="project_name", match=MatchValue(value=project_name)))
+            must.append(
+                FieldCondition(
+                    key="project_name",
+                    match=MatchValue(
+                        value=project_name,
+                    ),
+                )
+            )
+
         if document_name:
-            must.append(FieldCondition(key="document_name", match=MatchValue(value=document_name)))
+            must.append(
+                FieldCondition(
+                    key="document_name",
+                    match=MatchValue(
+                        value=document_name,
+                    ),
+                )
+            )
+
         points, _ = self._client.scroll(
             collection_name=collection_name,
-            scroll_filter=Filter(must=must),
+            scroll_filter=Filter(
+                must=must
+            ),
             limit=limit,
             with_payload=True,
         )
-        return sorted(self._convert_results(points), key=lambda chunk: chunk.chunk_number)
+
+        return sorted(
+            self._convert_results(points),
+            key=lambda chunk: chunk.chunk_number,
+        )
+
+    # ================================================================
+    # REPRESENTATIVE DOCUMENT RETRIEVAL
+    # ================================================================
 
     def get_representative_document_chunks(
         self,
@@ -548,23 +716,144 @@ class QdrantRepository:
         limit: int = 16,
         scan_limit: int = 1000,
     ) -> list[RetrievedChunk]:
-        """Bounded, page-spread evidence for document-level summaries."""
-        must = [FieldCondition(key="document_name", match=MatchValue(value=document_name))]
-        if project_name:
-            must.append(FieldCondition(key="project_name", match=MatchValue(value=project_name)))
-        points, _ = self._client.scroll(
-            collection_name=collection_name,
-            scroll_filter=Filter(must=must),
-            limit=scan_limit,
-            with_payload=True,
-        )
-        chunks = sorted(self._convert_results(points), key=lambda chunk: (chunk.page_number, chunk.chunk_number))
-        text_chunks = [chunk for chunk in chunks if chunk.chunk_type in {"text", "ocr"} and chunk.text.strip()]
-        if len(text_chunks) <= limit:
-            return text_chunks
-        indices = {round(index * (len(text_chunks) - 1) / (limit - 1)) for index in range(limit)}
-        return [chunk for index, chunk in enumerate(text_chunks) if index in indices]
+        """
+        Retrieve representative text/OCR evidence from an entire document.
 
+        Qdrant scrolling is paginated so documents larger than one Qdrant
+        scroll batch are handled correctly.
+
+        Only text and OCR chunks are used for document-level summaries.
+
+        The final evidence is spread across the document so that summaries
+        are not biased toward the beginning of the document.
+        """
+
+        if not document_name or limit <= 0:
+            return []
+
+        must = [
+            FieldCondition(
+                key="document_name",
+                match=MatchValue(
+                    value=document_name,
+                ),
+            )
+        ]
+
+        if project_name:
+            must.append(
+                FieldCondition(
+                    key="project_name",
+                    match=MatchValue(
+                        value=project_name,
+                    ),
+                )
+            )
+
+        query_filter = Filter(
+            must=must
+        )
+
+        all_chunks: list[RetrievedChunk] = []
+
+        offset = None
+
+        while True:
+
+            points, next_offset = self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=query_filter,
+                limit=scan_limit,
+                offset=offset,
+                with_payload=True,
+            )
+
+            if not points:
+                break
+
+            converted = self._convert_results(
+                points
+            )
+
+            for chunk in converted:
+
+                chunk_type = (
+                    getattr(
+                        chunk,
+                        "chunk_type",
+                        None,
+                    )
+                    or "text"
+                ).lower()
+
+                text = (
+                    getattr(
+                        chunk,
+                        "text",
+                        None,
+                    )
+                    or ""
+                ).strip()
+
+                if (
+                    chunk_type in {"text", "ocr"}
+                    and text
+                ):
+                    all_chunks.append(chunk)
+
+            if next_offset is None:
+                break
+
+            offset = next_offset
+
+        if not all_chunks:
+            return []
+
+        # Keep document reading order.
+        all_chunks.sort(
+            key=lambda chunk: (
+                getattr(
+                    chunk,
+                    "page_number",
+                    0,
+                )
+                or 0,
+                getattr(
+                    chunk,
+                    "chunk_number",
+                    0,
+                )
+                or 0,
+            )
+        )
+
+        # Small document: return everything.
+        if len(all_chunks) <= limit:
+            return all_chunks
+
+        # One requested representative chunk.
+        if limit == 1:
+            return [all_chunks[0]]
+
+        # Spread selected chunks evenly throughout the document.
+        indices = {
+            round(
+                index
+                * (len(all_chunks) - 1)
+                / (limit - 1)
+            )
+            for index in range(limit)
+        }
+
+        return [
+            chunk
+            for index, chunk in enumerate(all_chunks)
+            if index in indices
+        ]
+
+    # ================================================================
+    # TABLE SEARCH
+    # ================================================================
 
     def find_tables_by_query(
         self,
@@ -578,18 +867,8 @@ class QdrantRepository:
         """
         Retrieve table chunks using deterministic metadata + lexical matching.
 
-        This is intentionally separate from vector similarity search because
-        table requests such as:
-
-            Show me Table 1. Harvey 1 well data record
-            Show me Table 4. Summary result of MICP tests for Harvey 1
-            Show me Table on page 24
-
-        are better handled by exact table/page constraints followed by
-        lightweight content matching.
-
-        Existing indexed documents are supported even when their payload does
-        not contain the optional caption/table_number fields.
+        Explicit table/page constraints are handled before lightweight
+        content matching.
         """
 
         lowered_query = query.lower()
@@ -602,6 +881,7 @@ class QdrantRepository:
             r"\b(?:page|pages|pg|p\.)\s*(\d+)\b",
             lowered_query,
         )
+
         page_number = (
             int(page_match.group(1))
             if page_match
@@ -616,15 +896,17 @@ class QdrantRepository:
             r"\btable\s*(\d+)\b",
             lowered_query,
         )
+
         requested_table_number = (
             table_match.group(1)
             if table_match
-            else self._normalize_identifier(table_number)
+            else self._normalize_identifier(
+                table_number
+            )
         )
 
         # ------------------------------------------------------------
-        # Restrict retrieval to table chunks belonging to the requested
-        # project/document/page.
+        # Restrict retrieval to table chunks.
         # ------------------------------------------------------------
 
         must_conditions: list[FieldCondition] = [
@@ -670,7 +952,6 @@ class QdrantRepository:
             must=must_conditions
         )
 
-        # We deliberately use scroll here instead of vector search.
         points, _ = self._client.scroll(
             collection_name=collection_name,
             scroll_filter=query_filter,
@@ -719,44 +1000,57 @@ class QdrantRepository:
             and token not in stop_words
         }
 
-        scored_points: list[tuple[int, object]] = []
+        scored_points: list[
+            tuple[int, object]
+        ] = []
 
         for point in points:
+
             payload = point.payload or {}
 
             text_value = str(
-                payload.get("text") or ""
+                payload.get("text")
+                or ""
             )
 
             heading_value = str(
-                payload.get("heading") or ""
+                payload.get("heading")
+                or ""
             )
 
             section_value = str(
-                payload.get("section") or ""
+                payload.get("section")
+                or ""
             )
 
             caption_value = str(
-                payload.get("table_caption") or ""
+                payload.get("table_caption")
+                or ""
             )
 
             table_id_value = str(
-                payload.get("table_id") or ""
+                payload.get("table_id")
+                or ""
             )
-
 
             table_number_value = str(
-                payload.get("table_number") or ""
+                payload.get("table_number")
+                or ""
             )
 
-            # If a record has structured numbering, an explicit request must
-            # never be satisfied by a different numbered table. Legacy rows
-            # without this metadata remain eligible as a compatibility path.
-            normalized_table_number = self._normalize_identifier(table_number_value)
+            # If structured numbering exists, an explicit request
+            # must not return another numbered table.
+            normalized_table_number = (
+                self._normalize_identifier(
+                    table_number_value
+                )
+            )
+
             if (
                 requested_table_number
                 and table_number_value
-                and normalized_table_number != requested_table_number
+                and normalized_table_number
+                != requested_table_number
             ):
                 continue
 
@@ -775,13 +1069,10 @@ class QdrantRepository:
 
             # --------------------------------------------------------
             # Explicit table number.
-            #
-            # Prefer a real caption/table_number if present. For older
-            # records without those fields, do NOT reject the result;
-            # content matching still determines relevance.
             # --------------------------------------------------------
 
             if requested_table_number:
+
                 explicit_number_patterns = [
                     rf"\btable\s*{re.escape(requested_table_number)}\b",
                     rf"\btable[_\-\s]*{re.escape(requested_table_number)}\b",
@@ -792,7 +1083,8 @@ class QdrantRepository:
                         pattern,
                         searchable_text,
                     )
-                    for pattern in explicit_number_patterns
+                    for pattern
+                    in explicit_number_patterns
                 ):
                     score += 100
 
@@ -807,10 +1099,11 @@ class QdrantRepository:
             # --------------------------------------------------------
 
             for term in query_terms:
+
                 if term in searchable_text:
                     score += 2
 
-            # Exact phrase matching is a strong signal.
+            # Exact phrase matching.
             normalized_query = re.sub(
                 r"\s+",
                 " ",
@@ -823,21 +1116,22 @@ class QdrantRepository:
                 searchable_text,
             )
 
-            # Generic exact phrase signal for descriptive requests.
             meaningful_terms = [
-                term for term in query_terms
+                term
+                for term in query_terms
                 if not term.isdigit()
             ]
+
             if len(meaningful_terms) >= 2:
-                phrase = " ".join(meaningful_terms)
+
+                phrase = " ".join(
+                    meaningful_terms
+                )
+
                 if phrase in normalized_text:
                     score += 20
 
-            # --------------------------------------------------------
-            # Page query is already an exact Qdrant filter, so every
-            # returned point is relevant to the requested page.
-            # --------------------------------------------------------
-
+            # Page is already an exact Qdrant filter.
             if page_number is not None:
                 score += 100
 
@@ -850,11 +1144,13 @@ class QdrantRepository:
                 )
 
         # ------------------------------------------------------------
-        # If the query is simply "table on page X", return all tables
-        # from that exact page rather than requiring lexical matches.
+        # "table on page X"
         # ------------------------------------------------------------
 
-        if page_number is not None and not query_terms:
+        if (
+            page_number is not None
+            and not query_terms
+        ):
             return self._convert_results(
                 points[:limit]
             )
@@ -866,7 +1162,8 @@ class QdrantRepository:
 
         selected_points = [
             point
-            for _, point in scored_points[:limit]
+            for _, point
+            in scored_points[:limit]
         ]
 
         return self._convert_results(
@@ -874,10 +1171,23 @@ class QdrantRepository:
         )
 
     @staticmethod
-    def _normalize_identifier(value: object) -> str:
-        """Normalize plain and labelled numeric metadata (for legacy payloads)."""
-        match = re.search(r"\d+", str(value or ""))
-        return match.group(0) if match else ""
+    def _normalize_identifier(
+        value: object,
+    ) -> str:
+        """
+        Normalize plain and labelled numeric metadata.
+        """
+
+        match = re.search(
+            r"\d+",
+            str(value or ""),
+        )
+
+        return (
+            match.group(0)
+            if match
+            else ""
+        )
 
     # ================================================================
     # RESULT CONVERSION
@@ -914,6 +1224,8 @@ class QdrantRepository:
                 "document_type"
             )
 
+            # A result must contain the core metadata required by
+            # RetrievedChunk.
             if not all(
                 [
                     project_id_value,

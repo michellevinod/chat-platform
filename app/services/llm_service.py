@@ -11,6 +11,11 @@ class LLMService:
     Never call this for simple factual retrieval.
     """
 
+    NO_RESULT_RESPONSE = (
+        "I couldn't find relevant information in the uploaded documents. "
+        "I can answer only from uploaded documents."
+    )
+
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
 
@@ -28,7 +33,7 @@ class LLMService:
         context: str,
     ) -> str:
         if not self._client:
-            return "I couldn't find relevant information in the uploaded documents."
+            return self.NO_RESULT_RESPONSE
 
         prompt = f"""You are a Document Intelligence Assistant.
 
@@ -65,4 +70,4 @@ ANSWER:"""
 
         if last_error:
             print(f"Gemini generation error: {last_error}")
-        return "I couldn't find relevant information in the uploaded documents."
+        return self.NO_RESULT_RESPONSE
