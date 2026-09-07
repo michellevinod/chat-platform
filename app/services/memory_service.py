@@ -73,6 +73,8 @@ class MemoryService:
             "more details",
             "why is that",
             "what about that",
+            "what about",
+            "how about",
             "explain it",
             "continue",
         ]

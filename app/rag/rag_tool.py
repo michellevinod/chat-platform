@@ -44,3 +44,6 @@ class RAGTool:
 
     def get_representative_document_content(self, document_name: str, project_name: str | None = None, limit: int = 16):
         return self._search_service.representative_document_search(document_name, project_name, limit)
+
+    def get_distinct_documents(self, project_name: str | None = None) -> list[str]:
+        return self._search_service.distinct_documents(project_name)

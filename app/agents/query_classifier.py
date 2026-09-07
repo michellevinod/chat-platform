@@ -138,6 +138,7 @@ class QueryClassifier:
             or "summarize project" in lowered
             or "summarise project" in lowered
             or "overview of the project" in lowered
+            or re.search(r"\b(?:summarize|summarise|overview)\b.*\bproject\b", lowered)
         ):
             return QueryIntent.PROJECT_SUMMARY
 

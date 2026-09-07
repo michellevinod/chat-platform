@@ -9,6 +9,7 @@ from app.agents.query_classifier import (
     QueryIntent,
 )
 from app.services.llm_service import LLMService
+from app.services.memory_service import MemoryService
 
 
 class ChatService:
@@ -48,12 +49,67 @@ class ChatService:
         self._agent = ChatAgent()
         self._classifier = QueryClassifier()
         self._llm = LLMService()
+        self._memory = MemoryService()
+
+    def chat(
+        self,
+        query: str,
+        project_name: str | None = None,
+        document_name: str | None = None,
+        document_names: list[str] | None = None,
+        session_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> dict:
+        """Resolve conversational context around the existing chat flow."""
+
+        session_id = self._memory.get_or_create_session(
+            session_id or conversation_id
+        )
+        original_query = (query or "").strip()
+        effective_query, resolved_document, resolved_project = (
+            self._memory.resolve_query(
+                session_id=session_id,
+                query=original_query,
+                explicit_doc=document_name,
+                explicit_proj=project_name,
+            )
+        )
+
+        result = self._chat(
+            query=effective_query,
+            project_name=resolved_project,
+            document_name=resolved_document,
+            document_names=document_names,
+            session_id=session_id,
+            conversation_id=session_id,
+        )
+        result["session_id"] = session_id
+
+        response_text = result.get("response", "")
+        if response_text:
+            if "Which document would you like me to summarize?" in response_text:
+                self._memory.set_pending_prompt(
+                    session_id,
+                    "ask_document_summary",
+                )
+            citations = result.get("citations") or []
+            first_citation = citations[0] if citations else {}
+            self._memory.save_turn(
+                session_id=session_id,
+                query=original_query,
+                response=response_text,
+                project=first_citation.get("project") or resolved_project,
+                document=first_citation.get("document") or resolved_document,
+                citations=citations,
+            )
+
+        return result
 
     # =================================================================
         # MAIN CHAT ENTRY POINT
     # =================================================================
 
-    def chat(
+    def _chat(
         self,
         query: str,
         project_name: str | None = None,
@@ -509,10 +565,12 @@ class ChatService:
             or not response_text.strip()
             or self._looks_like_no_result(response_text)
         ):
-            return self._no_results(
-                session_id=session_id,
-                original_question=query,
-            )
+            response_text = self._build_grounded_digest(results)
+            if not response_text:
+                return self._no_results(
+                    session_id=session_id,
+                    original_question=query,
+                )
 
         citations = self._build_citations(
             results,
@@ -525,6 +583,42 @@ class ChatService:
             "citations": citations,
             "session_id": session_id,
         }
+
+    @staticmethod
+    def _build_grounded_digest(results: list[Any]) -> str:
+        """Return bounded source excerpts when synthesis is unavailable."""
+        excerpts: list[str] = []
+        seen: set[tuple[str | None, int | None, str]] = set()
+
+        for chunk in results:
+            chunk_type = (getattr(chunk, "chunk_type", "text") or "text").lower()
+            if chunk_type not in {"text", "ocr"}:
+                continue
+            text = ChatService._clean_response_text(getattr(chunk, "text", ""))
+            if not text:
+                continue
+            key = (
+                getattr(chunk, "document_name", None),
+                getattr(chunk, "page_number", None),
+                text,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            location = getattr(chunk, "document_name", None) or "Document"
+            page = getattr(chunk, "page_number", None)
+            if page is not None:
+                location = f"{location}, page {page}"
+            excerpts.append(f"**{location}**\n\n{text}")
+            if len(excerpts) >= 8:
+                break
+
+        return (
+            "### Grounded overview\n\n"
+            + "\n\n".join(excerpts)
+            if excerpts
+            else ""
+        )
 
     # =================================================================
     # LLM CONTEXT
@@ -723,8 +817,21 @@ class ChatService:
         tables: list[str] = []
 
         seen: set[tuple] = set()
+        structured_pages = {
+            getattr(chunk, "page_number", None)
+            for chunk in results
+            if getattr(chunk, "table_headers", None)
+            or getattr(chunk, "table_rows", None)
+        }
 
         for chunk in results[:3]:
+            if (
+                getattr(chunk, "page_number", None) in structured_pages
+                and not getattr(chunk, "table_headers", None)
+                and not getattr(chunk, "table_rows", None)
+            ):
+                continue
+
             document_name = getattr(
                 chunk,
                 "document_name",
@@ -866,6 +973,13 @@ class ChatService:
             normalized_rows.append(
                 normalized_row
             )
+
+        normalized_header = tuple(headers)
+        normalized_rows = [
+            row
+            for row in normalized_rows
+            if tuple(row[:len(headers)]) != normalized_header
+        ]
 
         # -------------------------------------------------------------
         # Determine width

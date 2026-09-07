@@ -364,6 +364,20 @@ class ChatAgent(BaseAgent):
                 limit=16,
             )
 
+        if project_name:
+            representatives: list[Any] = []
+            for name in self._rag.get_distinct_documents(
+                project_name=project_name,
+            ):
+                representatives.extend(
+                    self._rag.get_representative_document_content(
+                        document_name=name,
+                        project_name=project_name,
+                        limit=4,
+                    )
+                )
+            return representatives[:24]
+
         return self._search_rag(
             query="main topics sections key points overview",
             project_name=project_name,

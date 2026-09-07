@@ -61,3 +61,9 @@ class SearchService:
 
     def representative_document_search(self, document_name: str, project_name: str | None = None, limit: int = 16):
         return self._repository.get_representative_document_chunks("documents", document_name, project_name, limit)
+
+    def distinct_documents(self, project_name: str | None = None) -> list[str]:
+        return self._repository.get_distinct_documents(
+            collection_name="documents",
+            project_name=project_name,
+        )
