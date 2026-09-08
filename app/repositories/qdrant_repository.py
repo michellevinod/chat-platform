@@ -436,12 +436,15 @@ class QdrantRepository:
                     candidates[key] = chunk
 
         ranked = sorted(candidates.values(), key=lambda item: item.score, reverse=True)
+        if chunk_type in {"image", "table"}:
+            return ranked[:max(limit, 1)]
         return self.expand_context(
             collection_name=collection_name,
             seeds=ranked[:max(limit, 12)],
             limit=max(limit * 4, 24),
             project_name=project_name,
             document_name=document_name,
+            chunk_type=chunk_type,
         )
 
     @staticmethod
@@ -473,6 +476,7 @@ class QdrantRepository:
         limit: int = 24,
         project_name: str | None = None,
         document_name: str | None = None,
+        chunk_type: str | None = None,
         window: int = 2,
     ) -> list[RetrievedChunk]:
         """Add bounded reading-order context around relevant chunks."""
@@ -484,6 +488,8 @@ class QdrantRepository:
             must.append(FieldCondition(key="project_name", match=MatchValue(value=project_name)))
         if document_name:
             must.append(FieldCondition(key="document_name", match=MatchValue(value=document_name)))
+        if chunk_type:
+            must.append(FieldCondition(key="chunk_type", match=MatchValue(value=chunk_type)))
         scoped_filter = Filter(must=must) if must else None
 
         points: list = []

@@ -56,6 +56,12 @@ class QueryClassifier:
     "overview of the document",
     )
 
+    SUMMARY_PATTERN = re.compile(
+        r"\b(?:what|tell me|can you tell me|give me|provide)\b"
+        r".*\b(?:document|file|report|paper|manual)\b"
+        r".*\b(?:about|contain|cover|overview|summary)\b"
+    )
+
     SYNTHESIS_TERMS = {
         "summarize",
         "summarise",
@@ -114,9 +120,7 @@ class QueryClassifier:
         not by the vocabulary used in the question.
         """
 
-        lowered = " ".join(
-            (query or "").lower().strip().split()
-        )
+        lowered = cls._normalize(query)
 
         if not lowered:
             return QueryIntent.RAG_FACTUAL
@@ -171,6 +175,15 @@ class QueryClassifier:
         if cls._contains_any(
             lowered,
             cls.SUMMARY_PHRASES,
+        ) or cls.SUMMARY_PATTERN.search(lowered):
+            return QueryIntent.DOCUMENT_SUMMARY
+
+        if (
+            re.search(r"\b(?:summarize|summarise|summary|overview)\b", lowered)
+            and (
+                re.search(r"\b(?:document|file|report|paper|manual)\b", lowered)
+                or re.search(r"\b(?:pdf|docx?|pptx?|xlsx?|txt|md)\b", lowered)
+            )
         ):
             return QueryIntent.DOCUMENT_SUMMARY
 
@@ -183,6 +196,12 @@ class QueryClassifier:
             cls.TABLE_TERMS,
         ):
             return QueryIntent.SEARCH_TABLE
+
+        if (
+            cls._contains_any(lowered, cls.IMAGE_TERMS)
+            and cls._contains_any_phrase(lowered, cls.SYNTHESIS_TERMS)
+        ):
+            return QueryIntent.RAG_SYNTHESIS
 
         # ---------------------------------------------------------
         # IMAGE / FIGURE
@@ -264,3 +283,13 @@ class QueryClassifier:
                 return True
 
         return False
+
+    @staticmethod
+    def _normalize(query: str) -> str:
+        """Normalize common conversational spelling before routing."""
+        normalized = (query or "").lower().replace("’", "'")
+        normalized = re.sub(r"\bwhat's\b|\bwhats\b", "what is", normalized)
+        normalized = re.sub(r"\bwho's\b", "who is", normalized)
+        normalized = re.sub(r"\bwhere's\b", "where is", normalized)
+        normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+        return " ".join(normalized.split())

@@ -10,6 +10,7 @@ from app.agents.query_classifier import (
 )
 from app.services.llm_service import LLMService
 from app.services.memory_service import MemoryService
+from app.agents.query_enhancer import QueryEnhancer
 
 
 class ChatService:
@@ -101,6 +102,7 @@ class ChatService:
                 project=first_citation.get("project") or resolved_project,
                 document=first_citation.get("document") or resolved_document,
                 citations=citations,
+                visual=result.get("visual"),
             )
 
         return result
@@ -286,6 +288,16 @@ class ChatService:
             QueryIntent.RAG_SYNTHESIS,
             QueryIntent.RAG_ENUMERATION,
         }:
+            if any(
+                (getattr(chunk, "chunk_type", "") or "").lower() == "image"
+                for chunk in results
+            ):
+                return self._build_visual_reasoning_response(
+                    query=query,
+                    results=results,
+                    project_name=project_name,
+                    session_id=session_id,
+                )
             return self._build_synthesis_response(
                 query=query,
                 results=results,
@@ -380,7 +392,7 @@ class ChatService:
                 "session_id": session_id,
             }
 
-        best_chunk = self._select_best_chunk(results)
+        best_chunk = self._select_best_chunk(query, results)
 
         if best_chunk is None:
             return self._no_results(
@@ -453,23 +465,28 @@ class ChatService:
         token for token in re.findall(r"[a-z0-9]+", query.lower())
         if len(token) >= 3 and token not in stop_words and not token.isdigit()
         }
-        if not terms:
-            return bool(results)
+        plan = QueryEnhancer.build_plan(query)
+        focus_terms = set(plan.focus_terms)
+        if not terms and not focus_terms:
+            return False
 
         for chunk in results:
             searchable = " ".join(
                 str(getattr(chunk, field, "") or "")
                 for field in ("text", "heading", "section", "table_caption", "image_caption")
             ).lower()
-            if terms.intersection(re.findall(r"[a-z0-9]+", searchable)):
+            candidate_terms = set(re.findall(r"[a-z0-9]+", searchable))
+            if terms.intersection(candidate_terms):
                 return True
-            if float(getattr(chunk, "score", 0.0) or 0.0) >= 0.72:
+            if focus_terms.intersection(candidate_terms):
                 return True
         return False
 
     @staticmethod
     def _select_relevant_table(query: str, results: list[Any]) -> Any | None:
         """Prefer a table when its actual cells support a factual question."""
+        if not QueryEnhancer.build_plan(query).requests_table:
+            return None
         stop_words = {"what", "which", "where", "when", "why", "how", "does", "is", "are", "the", "a", "an", "this", "that", "document", "say", "about", "show", "me", "on", "in", "of", "for", "to", "and", "with"}
         terms = {
         token for token in re.findall(r"[a-z0-9]+", query.lower())
@@ -498,6 +515,14 @@ class ChatService:
 
         for chunk in results:
             if chunk is best_chunk:
+                continue
+
+            if (
+                getattr(chunk, "document_name", None)
+                != getattr(best_chunk, "document_name", None)
+                or getattr(chunk, "page_number", None)
+                != getattr(best_chunk, "page_number", None)
+            ):
                 continue
 
             chunk_type = (getattr(chunk, "chunk_type", "") or "").lower()
@@ -532,6 +557,54 @@ class ChatService:
     # =================================================================
     # SYNTHESIS RESPONSE
     # =================================================================
+
+    def _build_visual_reasoning_response(
+        self,
+        query: str,
+        results: list[Any],
+        project_name: str | None,
+        session_id: str | None,
+    ) -> dict:
+        """Explain the selected source visual and return that same asset."""
+        visual = next(
+            (
+                chunk for chunk in results
+                if (getattr(chunk, "chunk_type", "") or "").lower() == "image"
+            ),
+            None,
+        )
+        if visual is None:
+            return self._no_results(session_id, query)
+
+        image_path = getattr(visual, "image_path", None)
+        context = self._build_llm_context([visual])
+        explanation = self._llm.generate_visual_answer(
+            question=query,
+            image_path=image_path or "",
+            context=context,
+        )
+        if self._looks_like_no_result(explanation):
+            return self._no_results(session_id, query)
+
+        image_name = self._extract_image_name(
+            image_path,
+            getattr(visual, "image_id", None),
+        )
+        response = explanation.strip()
+        if image_name:
+            response = f"{response}\n\n![Figure](/images/{image_name})"
+
+        return {
+            "success": True,
+            "response": response,
+            "citations": self._build_citations([visual], project_name),
+            "visual": {
+                "image_name": image_name,
+                "image_id": getattr(visual, "image_id", None),
+                "page": getattr(visual, "page_number", None),
+            },
+            "session_id": session_id,
+        }
 
     def _build_synthesis_response(
         self,
@@ -795,6 +868,11 @@ class ChatService:
             "success": True,
             "response": response,
             "citations": [citation],
+            "visual": {
+                "image_name": image_name,
+                "image_id": image_id,
+                "page": page_number,
+            },
             "session_id": session_id,
         }
 
@@ -815,6 +893,7 @@ class ChatService:
         """
 
         tables: list[str] = []
+        selected_chunks: list[Any] = []
 
         seen: set[tuple] = set()
         structured_pages = {
@@ -844,22 +923,22 @@ class ChatService:
                 None,
             )
 
-            table_id = getattr(
-                chunk,
-                "table_id",
-                None,
-            )
-
             key = (
                 document_name,
                 page_number,
-                table_id,
+                getattr(chunk, "table_caption", None),
+                tuple(getattr(chunk, "table_headers", None) or []),
+                tuple(
+                    tuple(row)
+                    for row in (getattr(chunk, "table_rows", None) or [])
+                ),
             )
 
             if key in seen:
                 continue
 
             seen.add(key)
+            selected_chunks.append(chunk)
 
             markdown_table = (
                 self._render_table_markdown(
@@ -895,6 +974,18 @@ class ChatService:
         return {
             "success": True,
             "response": "\n\n".join(tables),
+            "tables": [
+                {
+                    "table_id": getattr(chunk, "table_id", None),
+                    "document": getattr(chunk, "document_name", None),
+                    "page": getattr(chunk, "page_number", None),
+                    "caption": getattr(chunk, "table_caption", None),
+                    "headers": list(getattr(chunk, "table_headers", None) or []),
+                    "rows": [list(row) for row in (getattr(chunk, "table_rows", None) or [])],
+                }
+                for chunk in selected_chunks
+                if self._render_table_markdown(chunk)
+            ],
             "citations": citations,
             "session_id": session_id,
         }
@@ -1139,6 +1230,7 @@ class ChatService:
 
     @staticmethod
     def _select_best_chunk(
+        query: str,
         results: list[Any],
         ) -> Any | None:
         """
@@ -1182,7 +1274,25 @@ class ChatService:
         if not usable:
             return None
 
-        best = usable[0]
+        # Expanded neighbours are not necessarily answer-bearing evidence.
+        plan = QueryEnhancer.build_plan(query)
+
+        def answerability(chunk: Any) -> tuple[float, float, int]:
+            text = " ".join(
+                str(getattr(chunk, field, "") or "")
+                for field in ("text", "heading", "section")
+            ).lower()
+            tokens = set(re.findall(r"[a-z0-9]+", text))
+            overlap = len(tokens.intersection(plan.terms))
+            focus_overlap = len(tokens.intersection(plan.focus_terms))
+            structural = int(bool(getattr(chunk, "heading", None) or getattr(chunk, "section", None)))
+            return (
+                focus_overlap * 4.0 + overlap * 1.5 + structural * 0.25,
+                float(getattr(chunk, "score", 0.0) or 0.0),
+                len(text),
+            )
+
+        best = max(usable, key=answerability)
         best_text = str(getattr(best, "text", "") or "").strip()
         if len(best_text) < 100:
             same_page = [

@@ -166,11 +166,21 @@ class ChatAgent(BaseAgent):
                 ),
             }
 
+        if not document_name and intent in {
+            QueryIntent.DOCUMENT_SUMMARY,
+            QueryIntent.RAG_FACTUAL,
+            QueryIntent.RAG_SYNTHESIS,
+        }:
+            document_name = self._resolve_document_reference(
+                query=query,
+                project_name=project_name,
+            )
+
         # -------------------------------------------------------------
         # QUERY NORMALIZATION
         # -------------------------------------------------------------
 
-        enhanced_query = self._enhancer.enhance(query)
+        query_plan = self._enhancer.build_plan(query)
 
         page_number = self._extract_page_number(query)
         table_number = self._extract_table_number(query)
@@ -217,6 +227,20 @@ class ChatAgent(BaseAgent):
                 "table_number": table_number,
             }
 
+        if intent == QueryIntent.RAG_SYNTHESIS and query_plan.requests_visual:
+            results = self._search_images(
+                query=query,
+                project_name=project_name,
+                document_name=document_name,
+                page_number=page_number,
+            )
+            return {
+                "intent": intent,
+                "query": query,
+                "results": results,
+                "page_number": page_number,
+            }
+
         # -------------------------------------------------------------
         # DOCUMENT / PROJECT SUMMARY
         # -------------------------------------------------------------
@@ -244,11 +268,17 @@ class ChatAgent(BaseAgent):
         # -------------------------------------------------------------
 
         results = self._search_rag(
-            query=enhanced_query,
+            queries=query_plan.variants,
             project_name=project_name,
             document_name=document_name,
             page_number=page_number,
-            limit=12 if intent == QueryIntent.RAG_ENUMERATION else 8,
+            limit=(
+                24
+                if query_plan.focus_terms
+                else 12
+                if intent == QueryIntent.RAG_ENUMERATION
+                else 8
+            ),
         )
 
         return {
@@ -264,7 +294,7 @@ class ChatAgent(BaseAgent):
 
     def _search_rag(
         self,
-        query: str,
+        queries: tuple[str, ...],
         project_name: str | None,
         document_name: str | None,
         page_number: int | None = None,
@@ -280,8 +310,8 @@ class ChatAgent(BaseAgent):
                 document_name=document_name,
             )
 
-        return self._rag.search(
-            query=query,
+        return self._rag.search_many(
+            queries=queries,
             limit=limit,
             project_name=project_name,
             document_name=document_name,
@@ -343,6 +373,18 @@ class ChatAgent(BaseAgent):
     # =================================================================
     # SUMMARY RETRIEVAL
     # =================================================================
+
+    def _resolve_document_reference(
+        self,
+        query: str,
+        project_name: str | None,
+    ) -> str | None:
+        """Resolve an explicit indexed document name without hardcoding it."""
+        lowered_query = query.lower()
+        for name in self._rag.get_distinct_documents(project_name):
+            if name and name.lower() in lowered_query:
+                return name
+        return None
 
     def _retrieve_summary_evidence(
         self,

@@ -1,5 +1,6 @@
-from typing import Any
 import uuid
+import re
+from typing import Any
 
 
 class MemoryService:
@@ -52,6 +53,20 @@ class MemoryService:
         resolved_doc = explicit_doc or (last_turn.get("document") if last_turn else None)
         resolved_proj = explicit_proj or (last_turn.get("project") if last_turn else None)
 
+        previous_visual = last_turn.get("visual") if last_turn else None
+        visual_reference = re.search(
+            r"\b(?:this|that|the above|the previous|it)\b",
+            query_strip.lower(),
+        )
+        if previous_visual and visual_reference:
+            image_name = previous_visual.get("image_name")
+            if image_name:
+                return (
+                    f"{query_strip} image {image_name}",
+                    resolved_doc,
+                    resolved_proj,
+                )
+
         # 1. If previous turn asked "Which document would you like me to summarize?"
         if pending == "ask_document_summary" and last_turn:
             self.clear_pending_prompt(session_id)
@@ -95,6 +110,7 @@ class MemoryService:
         project: str | None = None,
         document: str | None = None,
         citations: list[dict[str, Any]] | None = None,
+        visual: dict[str, Any] | None = None,
     ) -> None:
         if session_id not in self._sessions:
             self._sessions[session_id] = []
@@ -106,6 +122,7 @@ class MemoryService:
                 "project": project,
                 "document": document,
                 "citations": citations or [],
+                "visual": visual,
             }
         )
 

@@ -53,4 +53,6 @@ class ChatResponse(BaseModel):
     success: bool
     response: str
     citations: list[Citation] = Field(default_factory=list)
+    visual: dict | None = None
+    tables: list[dict] = Field(default_factory=list)
     session_id: str | None = None
