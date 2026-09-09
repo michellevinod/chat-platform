@@ -54,18 +54,24 @@ class MemoryService:
         resolved_proj = explicit_proj or (last_turn.get("project") if last_turn else None)
 
         previous_visual = last_turn.get("visual") if last_turn else None
-        visual_reference = re.search(
+        pronoun_reference = re.search(
             r"\b(?:this|that|the above|the previous|it)\b",
             query_strip.lower(),
         )
-        if previous_visual and visual_reference:
-            image_name = previous_visual.get("image_name")
-            if image_name:
+        if last_turn and pronoun_reference:
+            prev_query = last_turn.get("query", "")
+            prev_resp = last_turn.get("response", "")
+            if previous_visual and previous_visual.get("image_name"):
+                image_name = previous_visual.get("image_name")
                 return (
                     f"{query_strip} image {image_name}",
                     resolved_doc,
                     resolved_proj,
                 )
+            combined_query = (
+                f"{prev_query}. Context: {prev_resp[:200]}. {query_strip}"
+            )
+            return combined_query, resolved_doc, resolved_proj
 
         # 1. If previous turn asked "Which document would you like me to summarize?"
         if pending == "ask_document_summary" and last_turn:
@@ -100,7 +106,7 @@ class MemoryService:
             combined_query = f"{prev_query}. Context: {prev_resp[:200]}. {query_strip}"
             return combined_query, resolved_doc, resolved_proj
 
-        return query_strip, explicit_doc, explicit_proj
+        return query_strip, resolved_doc, resolved_proj
 
     def save_turn(
         self,

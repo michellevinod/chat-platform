@@ -460,6 +460,7 @@ class ChatService:
         "what", "which", "where", "when", "why", "how", "does", "did", "is", "are",
         "the", "a", "an", "this", "that", "document", "say", "about", "show", "me",
         "tell", "please", "on", "in", "of", "for", "to", "and", "with", "page", "from", "into", "than", "then",
+        "make", "use", "need", "want",
         }
         terms = {
         token for token in re.findall(r"[a-z0-9]+", query.lower())

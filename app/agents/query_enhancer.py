@@ -30,8 +30,9 @@ class QueryEnhancer:
     _STOP_WORDS = {
         "a", "an", "and", "are", "be", "can", "did", "do", "does",
         "for", "from", "give", "has", "have", "how", "in", "is", "it",
-        "me", "of", "on", "please", "say", "tell", "the", "this", "that",
-        "to", "was", "what", "when", "where", "which", "who", "why", "with",
+        "make", "me", "of", "on", "please", "say", "tell", "the", "this",
+        "that", "to", "use", "was", "what", "when", "where", "which", "who",
+        "why", "with",
     }
 
     _VISUAL_TERMS = {
