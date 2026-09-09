@@ -143,6 +143,7 @@ async function loadProjects() {
 
             currentProject = "";
             clearDocuments();
+            updateProjectSummaryButtonState();
 
             return;
         }
@@ -177,9 +178,12 @@ async function loadProjects() {
 
             if (exists) {
                 select.value = currentProject;
+                updateProjectSummaryButtonState();
                 await loadDocuments();
             }
         }
+
+        updateProjectSummaryButtonState();
 
     } catch (error) {
         console.error("Load projects error:", error);
@@ -387,6 +391,7 @@ function updateDocumentHeader() {
                 "Select a project and document to begin";
         }
 
+        updateProjectSummaryButtonState();
         return;
     }
 
@@ -400,6 +405,7 @@ function updateDocumentHeader() {
                 "Select a document to begin";
         }
 
+        updateProjectSummaryButtonState();
         return;
     }
 
@@ -411,6 +417,23 @@ function updateDocumentHeader() {
         subtitle.textContent =
             `Project: ${currentProject}`;
     }
+
+    updateProjectSummaryButtonState();
+}
+
+
+function updateProjectSummaryButtonState() {
+    const button = $("projectSummaryBtn");
+
+    if (!button) {
+        return;
+    }
+
+    const hasProject = Boolean(currentProject);
+    button.disabled = !hasProject;
+    button.title = hasProject
+        ? `Generate AI summary for ${currentProject}`
+        : "Select a project first";
 }
 
 
@@ -1063,6 +1086,65 @@ function setupRefreshDocuments() {
     });
 }
 
+
+async function generateProjectSummary() {
+    if (!currentProject) {
+        showToast(
+            "Please select a project first.",
+            true
+        );
+
+        return;
+    }
+
+    const confirmed = window.confirm(
+        `Generate an AI summary of project "${currentProject}" using all documents in this project?`
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    const summaryButton = $("projectSummaryBtn");
+    const loadingMessage = appendLoadingMessage();
+
+    if (summaryButton) {
+        summaryButton.disabled = true;
+    }
+
+    try {
+        const data = await apiRequest(
+            `/projects/summary?project_name=${encodeURIComponent(currentProject)}`
+        );
+
+        if (loadingMessage) {
+            loadingMessage.remove();
+        }
+
+        const summary = data.summary || "I couldn't generate a project summary.";
+
+        appendMessage(
+            "assistant",
+            `## AI Project Summary\n\n${summary}`
+        );
+
+    } catch (error) {
+        console.error("Project summary error:", error);
+
+        if (loadingMessage) {
+            loadingMessage.remove();
+        }
+
+        appendMessage(
+            "assistant",
+            `Sorry, I couldn't generate the project summary.\n\n**Error:** ${error.message}`
+        );
+
+    } finally {
+        updateProjectSummaryButtonState();
+    }
+}
+
 function setupDocumentSelectionControls() {
     $("selectAllDocumentsBtn")?.addEventListener("click", () => {
         const names = Array.from(document.querySelectorAll(".document-item span"))
@@ -1174,6 +1256,15 @@ document.addEventListener("DOMContentLoaded", async () => {
         createProjectButton.addEventListener(
             "click",
             createProject
+        );
+    }
+
+    const projectSummaryButton = $("projectSummaryBtn");
+
+    if (projectSummaryButton) {
+        projectSummaryButton.addEventListener(
+            "click",
+            generateProjectSummary
         );
     }
 

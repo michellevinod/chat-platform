@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.repositories.project_repository import ProjectRepository
+from app.services.summary_service import SummaryService
 
 
 router = APIRouter(
@@ -11,6 +12,7 @@ router = APIRouter(
 
 
 _repo = ProjectRepository()
+_summary_service = SummaryService()
 
 
 class CreateProjectRequest(BaseModel):
@@ -43,6 +45,33 @@ def list_projects():
         "success": True,
         "projects": projects,
         "count": len(projects),
+    }
+
+
+@router.get("/summary")
+def summarize_project(
+    project_name: str = Query(
+        ...,
+        description="Project to summarize",
+    ),
+):
+    """
+    Generate a grounded AI summary for a specific project.
+    """
+    project_name = project_name.strip()
+
+    if not project_name:
+        raise HTTPException(
+            status_code=400,
+            detail="project_name cannot be empty.",
+        )
+
+    summary = _summary_service.summarize_project(project_name)
+
+    return {
+        "success": True,
+        "project_name": project_name,
+        "summary": summary,
     }
 
 

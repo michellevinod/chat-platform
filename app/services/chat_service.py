@@ -227,6 +227,24 @@ class ChatService:
 
         results = agent_response.get("results") or []
 
+        page_number = agent_response.get("page_number")
+
+        if page_number is not None:
+            if not results:
+                return {
+                    "success": True,
+                    "response": (
+                        f"I couldn't find page {page_number} in the selected project/document."
+                    ),
+                    "citations": [],
+                    "session_id": session_id,
+                }
+            return self._build_page_response(
+                results=results,
+                project_name=project_name,
+                session_id=session_id,
+            )
+
         # -------------------------------------------------------------
         # NO EVIDENCE
         # -------------------------------------------------------------
@@ -263,13 +281,6 @@ class ChatService:
 
         if agent_intent == QueryIntent.SEARCH_TABLE:
             return self._build_table_response(
-                results=results,
-                project_name=project_name,
-                session_id=session_id,
-            )
-
-        if agent_response.get("page_number") is not None:
-            return self._build_page_response(
                 results=results,
                 project_name=project_name,
                 session_id=session_id,
